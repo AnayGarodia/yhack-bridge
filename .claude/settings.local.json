@@ -1,7 +1,14 @@
 {
   "permissions": {
     "allow": [
-      "Bash(mkdir:*)"
+      "Bash(mkdir:*)",
+      "Bash(venv/bin/pip show:*)",
+      "Bash(venv/bin/python -c \"import mediapipe as mp; print\\(dir\\(mp\\)\\)\")",
+      "Bash(venv/bin/python -c \"import mediapipe as mp; print\\(dir\\(mp.tasks\\)\\); print\\(dir\\(mp.tasks.vision\\)\\)\")",
+      "Bash(venv/bin/python -c \"\nfrom mediapipe.tasks.vision import HandLandmarker, HandLandmarkerOptions, RunningMode\nfrom mediapipe.tasks import BaseOptions\nprint\\('HandLandmarker OK'\\)\nprint\\(dir\\(HandLandmarkerOptions\\)\\)\n\")",
+      "Bash(venv/bin/python -c \"\nimport mediapipe as mp\nv = mp.tasks.vision\nprint\\(dir\\(v.HandLandmarker\\)\\)\nopts = v.HandLandmarkerOptions\nprint\\(opts.__doc__\\)\n\")",
+      "Bash(find:*)",
+      "Bash(venv/bin/python -c \"\nimport mediapipe as mp\ndu = mp.tasks.vision.drawing_utils\nimport inspect\nprint\\(inspect.signature\\(du.draw_landmarks\\)\\)\n\")"
     ]
   }
 }
