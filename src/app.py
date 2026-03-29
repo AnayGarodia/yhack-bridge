@@ -179,7 +179,7 @@ def _stt_flush_loop():
             print(f"[stt] error: {e}")
 
 
-stt = SpeechToText(on_text=_on_speech_word, energy_threshold=0.03)
+stt = SpeechToText(on_text=_on_speech_word, energy_threshold=0.005)  # very sensitive — picks up quiet speech
 
 # ── Shared state ─────────────────────────────────────────────────────────────
 _latest_frame: bytes | None = None
