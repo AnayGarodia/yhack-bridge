@@ -182,15 +182,41 @@ body {
   background: #141414;
   flex: 1;
   min-height: 0;
+  position: relative;
+}
+.avatar-svg {
+  position: absolute;
+  inset: 0;
   display: flex;
   align-items: center;
   justify-content: center;
+  opacity: 0;
+  transition: opacity 0.3s ease-in-out;
+  padding: 8px;
 }
-.avatar-wrap img {
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-  display: block;
+.avatar-svg.active { opacity: 1; }
+.avatar-svg svg { width: 100%; height: 100%; border-radius: 8px; }
+.avatar-sign-label {
+  position: absolute;
+  bottom: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0,0,0,0.6);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 4px 14px;
+  border-radius: 20px;
+  letter-spacing: 1px;
+  pointer-events: none;
+  transition: opacity 0.3s;
+}
+.avatar-svg.idle svg {
+  animation: breathe 3s ease-in-out infinite;
+}
+@keyframes breathe {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.008) translateY(-1px); }
 }
 .avatar-status {
   background: var(--surface);
@@ -394,11 +420,17 @@ body {
 
   <!-- Center: avatar -->
   <div class="panel-center">
-    <div class="avatar-wrap">
-      <img id="avatar" src="/avatar_feed" alt="ASL Avatar">
+    <div class="avatar-wrap" id="avatar-container">
+      <!-- 3D RPM avatar (MJPEG stream) — shown when RPM is active -->
+      <img id="avatar-3d" src="/avatar_feed" alt="3D Avatar"
+           style="width:100%;height:100%;object-fit:contain;border-radius:8px;display:block"/>
+      <!-- SVG fallback layers (hidden when 3D is active) -->
+      <div class="avatar-svg" id="avatar-svg-a" style="display:none"></div>
+      <div class="avatar-svg" id="avatar-svg-b" style="display:none"></div>
+      <div class="avatar-sign-label" id="avatar-sign-label"></div>
     </div>
     <div class="avatar-status">
-      <div class="avatar-label" id="avatar-sign">Avatar Idle</div>
+      <div class="avatar-label" id="avatar-sign">Idle</div>
       <div class="avatar-queue" id="avatar-queue"></div>
     </div>
   </div>
@@ -519,24 +551,85 @@ socket.on('sentence_complete', (data) => {
 // ── Speech transcribed (hearing person spoke) ────────────────────────────
 socket.on('speech_transcribed', (data) => {
   addMessage('speaker', data.english, data.asl_glosses.join(' '));
-  // Update avatar status with queued glosses
-  el.avatarSign.textContent = 'Signing: ' + data.asl_glosses[0];
-  el.avatarQueue.textContent = data.asl_glosses.length + ' signs queued';
+  el.avatarSign.textContent = 'Translating...';
+  el.avatarQueue.textContent = data.asl_glosses.length + ' signs';
 });
 
-// ── Avatar status updates ───────────────────────────────────────────────
-socket.on('avatar_status', (data) => {
-  if (data.current_sign) {
-    el.avatarSign.textContent = 'Signing: ' + data.current_sign;
-  } else {
-    el.avatarSign.textContent = 'Avatar Idle';
-  }
-  if (data.queue_length > 0) {
-    el.avatarQueue.textContent = data.queue_length + ' remaining';
-  } else {
-    el.avatarQueue.textContent = '';
-  }
+// ── Avatar SVG sign animation ───────────────────────────────────────────
+let avatarCurrentLayer = 'a';
+const avatarSignQueue = [];
+let avatarIsAnimating = false;
+let avatarIdleTimeout = null;
+
+// Load idle SVG on startup
+fetch('/avatar_idle_svg').then(r => r.text()).then(svg => {
+  document.getElementById('avatar-svg-a').innerHTML = svg;
 });
+
+socket.on('avatar_sign', (data) => {
+  avatarSignQueue.push(data);
+  if (!avatarIsAnimating) avatarPlayNext();
+});
+
+function avatarPlayNext() {
+  clearTimeout(avatarIdleTimeout);
+
+  if (avatarSignQueue.length === 0) {
+    avatarIsAnimating = false;
+    el.avatarQueue.textContent = '';
+    avatarIdleTimeout = setTimeout(() => {
+      if (!avatarIsAnimating) avatarShowIdle();
+    }, 3000);
+    return;
+  }
+
+  avatarIsAnimating = true;
+  const item = avatarSignQueue.shift();
+  const sign = item.sign;
+  const content = item.content;
+  const type = item.type || 'svg';
+
+  const next = avatarCurrentLayer === 'a' ? 'b' : 'a';
+  const nextEl = document.getElementById('avatar-svg-' + next);
+  const currEl = document.getElementById('avatar-svg-' + avatarCurrentLayer);
+
+  // Display content based on type
+  if (type === 'gif') {
+    nextEl.innerHTML = '<img src="' + content + '" alt="' + sign + '" style="width:100%;height:100%;object-fit:contain;border-radius:8px"/>';
+  } else {
+    nextEl.innerHTML = content;
+  }
+
+  nextEl.classList.remove('idle');
+  nextEl.classList.add('active');
+  currEl.classList.remove('active', 'idle');
+  avatarCurrentLayer = next;
+
+  document.getElementById('avatar-sign-label').textContent = sign;
+  el.avatarSign.textContent = 'Signing: ' + sign;
+  el.avatarQueue.textContent = avatarSignQueue.length > 0
+    ? avatarSignQueue.length + ' remaining' : '';
+
+  // Animated SVGs play their own @keyframes (0.8s), then hold
+  // GIFs loop on their own. Hold each sign 1.2s total then advance.
+  const holdTime = type === 'gif' ? 1500 : 1200;
+  setTimeout(avatarPlayNext, holdTime);
+}
+
+function avatarShowIdle() {
+  el.avatarSign.textContent = 'Idle';
+  document.getElementById('avatar-sign-label').textContent = '';
+  // Fetch idle SVG and crossfade to it
+  fetch('/avatar_idle_svg').then(r => r.text()).then(svg => {
+    const next = avatarCurrentLayer === 'a' ? 'b' : 'a';
+    const nextEl = document.getElementById('avatar-svg-' + next);
+    const currEl = document.getElementById('avatar-svg-' + avatarCurrentLayer);
+    nextEl.innerHTML = svg;
+    nextEl.classList.add('active', 'idle');
+    currEl.classList.remove('active', 'idle');
+    avatarCurrentLayer = next;
+  });
+}
 
 // ── Mic status ───────────────────────────────────────────────────────────
 socket.on('mic_status', (data) => {

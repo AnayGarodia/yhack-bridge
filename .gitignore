@@ -8,3 +8,6 @@ __pycache__/
 models/model.tflite
 src/recognition/holistic_landmarker.task
 src/recognition/wlasl_weights/
+models/avatar.glb
+models/sign_animations.npz
+debug/

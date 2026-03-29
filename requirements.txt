@@ -1,4 +1,11 @@
 absl-py==2.4.0
+google-genai>=1.0.0
+# 3D avatar rendering
+pyrender>=0.1.45
+trimesh>=3.21.0
+pyglet<2.0
+# macOS: brew install libosmesa | Linux: sudo apt-get install libosmesa6
+# Set PYOPENGL_PLATFORM=osmesa for headless rendering
 # TFLite inference (use tflite-runtime for lightweight, or tensorflow as fallback)
 # tflite-runtime>=2.14.0
 tensorflow>=2.14.0

@@ -2,10 +2,11 @@
 Bridge Web UI — Flask + SocketIO backend.
 
 Wires together: SignRouter (ASL recognition), SpeechPipeline (ASL→English→TTS),
-SpeechToText (mic→Whisper), EnglishToSigns (English→ASL glosses).
+SpeechToText (mic→Whisper), EnglishToSigns (English→ASL glosses),
+SignAnimator (animated SVG avatar).
 
 Run:  python src/app.py
-Open: http://localhost:5000
+Open: http://localhost:5001
 """
 
 import os
@@ -47,9 +48,11 @@ from src.speech.pipeline import SpeechPipeline
 from src.translation.text_smoother import TextSmoother
 from src.translation.english_to_signs import EnglishToSigns
 from src.translation.sign_decoder import SignDecoder
-from src.avatar.sign_database import SignDatabase
-from src.avatar.avatar_renderer import AvatarRenderer
-from src.avatar.avatar_controller import AvatarController
+from src.avatar.sign_animator import SignAnimator
+from src.avatar.sign_library import SignLibrary
+from src.avatar.rpm_renderer import RPMRenderer
+from src.avatar.animation_engine import AnimationEngine
+from src.avatar.rpm_controller import RPMAvatarController
 
 
 # ── WebSpeechPipeline — adds SocketIO emit on sentence completion ────────────
@@ -91,19 +94,75 @@ smoother = TextSmoother(lava_token=lava_token)
 tts = TTSEngine(eleven_api_key=eleven_key)
 pipeline = WebSpeechPipeline(smoother, tts, socketio, sign_router, pause_s=3.5)
 e2s = EnglishToSigns(lava_token=lava_token)
-sign_db = SignDatabase()
-avatar_renderer = AvatarRenderer(width=480, height=640)
-avatar_controller = AvatarController(sign_db, avatar_renderer)
+sign_animator = SignAnimator(
+    gemini_api_key=os.environ.get("GEMINI_API_KEY", ""),
+    lava_token=lava_token,
+)
 
-# ── STT with SocketIO callback ───────────────────────────────────────────────
-def _on_speech(text: str):
-    print(f"[stt] heard: {text!r}")
-    glosses = e2s.convert(text)
-    print(f"[stt] glosses: {glosses}")
-    socketio.emit("speech_transcribed", {"english": text, "asl_glosses": glosses})
-    avatar_controller.enqueue(glosses)
+# ── RPM Avatar System ───────────────────────────────────────────────────────
+# NOTE: RPM renderer uses OpenGL which is thread-local. The renderer must be
+# initialized AND called from the SAME thread. So we defer init to a dedicated
+# render thread and share frames via _avatar_frame / _avatar_frame_lock.
+sign_library = SignLibrary()
+_rpm_avatar_ok = sign_library.load()
+rpm_controller = None  # initialized in _avatar_render_loop thread
 
-stt = SpeechToText(on_text=_on_speech, energy_threshold=0.03)
+_avatar_frame: bytes | None = None
+_avatar_frame_lock = threading.Lock()
+
+# ── STT with word-buffering callback ─────────────────────────────────────────
+_stt_word_buffer: list[str] = []
+_stt_last_word_time = 0.0
+_stt_flush_interval = 1.5
+_stt_lock = threading.Lock()
+
+
+def _on_speech_word(word: str):
+    with _stt_lock:
+        _stt_word_buffer.append(word)
+        global _stt_last_word_time
+        _stt_last_word_time = time.time()
+    print(f"[stt] word: {word!r}  (buffer: {len(_stt_word_buffer)} words)")
+
+
+def _stt_flush_loop():
+    global _stt_last_word_time
+    while _running:
+        time.sleep(0.2)
+        with _stt_lock:
+            if not _stt_word_buffer:
+                continue
+            elapsed = time.time() - _stt_last_word_time
+            if elapsed < _stt_flush_interval:
+                continue
+            sentence = " ".join(_stt_word_buffer)
+            _stt_word_buffer.clear()
+
+        print(f"[stt] sentence: {sentence!r}")
+        try:
+            glosses = e2s.convert(sentence)
+            print(f"[stt] glosses: {glosses}")
+            socketio.emit("speech_transcribed", {"english": sentence, "asl_glosses": glosses})
+
+            # Feed glosses to RPM avatar controller (3D) if available
+            if rpm_controller is not None:
+                for gloss in glosses:
+                    rpm_controller.queue_word(gloss)
+
+            # Also send animated SVG for each gloss (web fallback)
+            for gloss in glosses:
+                anim = sign_animator.get_animation(gloss)
+                socketio.emit("avatar_sign", {
+                    "sign": gloss,
+                    "type": anim["type"],
+                    "content": anim["content"],
+                })
+                time.sleep(0.1)
+        except Exception as e:
+            print(f"[stt] error: {e}")
+
+
+stt = SpeechToText(on_text=_on_speech_word, energy_threshold=0.03)
 
 # ── Shared state ─────────────────────────────────────────────────────────────
 _latest_frame: bytes | None = None
@@ -114,7 +173,7 @@ _mic_active = False
 CAMERA_INDEX = int(os.environ.get("CAMERA_INDEX", "0"))
 
 
-# ── Recognition thread ───────────────────────────────────────────────────────
+# ── Recognition thread (instant webcam start) ───────────────────────────────
 def _recognition_loop():
     global _latest_frame, _running
 
@@ -123,8 +182,22 @@ def _recognition_loop():
         print(f"[cam] WARNING: cannot open camera {CAMERA_INDEX}, trying 0")
         cap = cv2.VideoCapture(0)
 
+    # Stream raw webcam frames IMMEDIATELY while models load
+    print("[cam] camera open — streaming raw frames while models load...")
+    for _ in range(60):  # ~2 seconds of raw frames
+        ret, frame = cap.read()
+        if ret:
+            _, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+            with _frame_lock:
+                _latest_frame = jpeg.tobytes()
+        if not _running:
+            cap.release()
+            return
+        time.sleep(0.033)
+
+    # NOW load models (webcam already visible to user)
     sign_router.open()
-    print(f"[cam] recognition loop started (camera {CAMERA_INDEX})")
+    print(f"[cam] models loaded — full recognition active (camera {CAMERA_INDEX})")
 
     frame_n = 0
     while _running:
@@ -135,14 +208,12 @@ def _recognition_loop():
 
         annotated, committed_sign, committed_conf, committed_mode = sign_router.process_frame(frame)
 
-        # Encode for MJPEG stream
         _, jpeg = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 70])
         with _frame_lock:
             _latest_frame = jpeg.tobytes()
 
-        # Send live prediction to UI (what model currently thinks, even mid-sign)
         frame_n += 1
-        if frame_n % 5 == 0:  # throttle to ~6 updates/sec
+        if frame_n % 5 == 0:
             live_sign, live_conf, live_top5 = sign_router.get_live_display()
             if live_sign:
                 socketio.emit("sign_update", {
@@ -161,7 +232,6 @@ def _recognition_loop():
                     "signs": live_decoded,
                 })
 
-        # Only feed pipeline when a sign is COMMITTED (hands dropped after signing)
         if committed_sign:
             socketio.emit("sign_committed", {
                 "sign": committed_sign,
@@ -174,6 +244,38 @@ def _recognition_loop():
     print("[cam] recognition loop stopped")
 
 
+# ── Avatar render loop (runs in its own thread for OpenGL context) ───────────
+def _avatar_render_loop():
+    """Initialize and run RPM renderer in a dedicated thread (OpenGL is thread-local)."""
+    global rpm_controller, _avatar_frame
+
+    if not _rpm_avatar_ok:
+        print("[rpm] Sign library unavailable — avatar render loop not started")
+        return
+
+    renderer = RPMRenderer("models/avatar.glb", width=1280, height=720)
+    if not renderer.load():
+        print("[rpm] Renderer load failed — avatar render loop not started")
+        return
+
+    engine = AnimationEngine()
+    ctrl = RPMAvatarController(renderer, sign_library, engine)
+
+    # Make controller accessible to flush loop for queueing words
+    global rpm_controller
+    rpm_controller = ctrl
+    print("[rpm] Avatar render loop started (dedicated thread)")
+
+    while _running:
+        frame = ctrl.get_frame()
+        _, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+        with _avatar_frame_lock:
+            _avatar_frame = jpeg.tobytes()
+        time.sleep(0.033)  # ~30fps
+
+    print("[rpm] Avatar render loop stopped")
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 @app.route("/")
 def index():
@@ -182,26 +284,44 @@ def index():
 
 @app.route("/video_feed")
 def video_feed():
+    _placeholder = np.full((480, 640, 3), 20, dtype=np.uint8)
+    cv2.putText(_placeholder, "Starting camera...", (170, 250),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (100, 100, 100), 2, cv2.LINE_AA)
+    _, _ph_jpeg = cv2.imencode(".jpg", _placeholder)
+    _ph_bytes = _ph_jpeg.tobytes()
+
     def generate():
         while _running:
             with _frame_lock:
                 frame = _latest_frame
-            if frame:
-                yield (b"--frame\r\n"
-                       b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n")
-            time.sleep(0.033)  # ~30 fps cap
+            data = frame if frame else _ph_bytes
+            yield (b"--frame\r\n"
+                   b"Content-Type: image/jpeg\r\n\r\n" + data + b"\r\n")
+            time.sleep(0.033)
     return Response(generate(), mimetype="multipart/x-mixed-replace; boundary=frame")
+
+
+@app.route("/avatar_idle_svg")
+def avatar_idle_svg():
+    return Response(sign_animator.idle_svg, mimetype="image/svg+xml")
 
 
 @app.route("/avatar_feed")
 def avatar_feed():
-    """MJPEG stream of the signing avatar animation."""
+    """MJPEG stream of the RPM 3D avatar (served from render thread buffer)."""
+    _ph = np.full((720, 1280, 3), 30, dtype=np.uint8)
+    cv2.putText(_ph, "Avatar loading...", (480, 360),
+                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (100, 100, 100), 2, cv2.LINE_AA)
+    _, _ph_jpeg = cv2.imencode(".jpg", _ph)
+    _ph_bytes = _ph_jpeg.tobytes()
+
     def generate():
         while _running:
-            frame = avatar_controller.get_frame()
-            _, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            with _avatar_frame_lock:
+                frame = _avatar_frame
+            data = frame if frame else _ph_bytes
             yield (b"--frame\r\n"
-                   b"Content-Type: image/jpeg\r\n\r\n" + jpeg.tobytes() + b"\r\n")
+                   b"Content-Type: image/jpeg\r\n\r\n" + data + b"\r\n")
             time.sleep(0.033)
     return Response(generate(), mimetype="multipart/x-mixed-replace; boundary=frame")
 
@@ -250,6 +370,8 @@ atexit.register(_cleanup)
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5001"))
     threading.Thread(target=_recognition_loop, daemon=True).start()
+    threading.Thread(target=_avatar_render_loop, daemon=True).start()
+    threading.Thread(target=_stt_flush_loop, daemon=True).start()
     pipeline.start()
     print(f"\n  Bridge is running at http://localhost:{port}\n")
     socketio.run(app, host="0.0.0.0", port=port, debug=False, allow_unsafe_werkzeug=True)
