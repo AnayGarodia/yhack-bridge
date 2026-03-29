@@ -46,6 +46,9 @@ from src.speech.tts import TTSEngine
 from src.speech.pipeline import SpeechPipeline
 from src.translation.text_smoother import TextSmoother
 from src.translation.english_to_signs import EnglishToSigns
+from src.avatar.sign_database import SignDatabase
+from src.avatar.avatar_renderer import AvatarRenderer
+from src.avatar.avatar_controller import AvatarController
 
 
 # ── WebSpeechPipeline — adds SocketIO emit on sentence completion ────────────
@@ -80,6 +83,9 @@ smoother = TextSmoother(lava_token=lava_token)
 tts = TTSEngine(eleven_api_key=eleven_key)
 pipeline = WebSpeechPipeline(smoother, tts, socketio, pause_s=2.0)
 e2s = EnglishToSigns(lava_token=lava_token)
+sign_db = SignDatabase()
+avatar_renderer = AvatarRenderer(width=480, height=640)
+avatar_controller = AvatarController(sign_db, avatar_renderer)
 
 # ── STT with SocketIO callback ───────────────────────────────────────────────
 def _on_speech(text: str):
@@ -87,6 +93,7 @@ def _on_speech(text: str):
     glosses = e2s.convert(text)
     print(f"[stt] glosses: {glosses}")
     socketio.emit("speech_transcribed", {"english": text, "asl_glosses": glosses})
+    avatar_controller.enqueue(glosses)
 
 stt = SpeechToText(on_text=_on_speech, energy_threshold=0.03)
 
@@ -111,27 +118,38 @@ def _recognition_loop():
     sign_router.open()
     print(f"[cam] recognition loop started (camera {CAMERA_INDEX})")
 
+    frame_n = 0
     while _running:
         ret, frame = cap.read()
         if not ret:
             time.sleep(0.01)
             continue
 
-        annotated, sign, conf, mode = sign_router.process_frame(frame)
+        annotated, committed_sign, committed_conf, committed_mode = sign_router.process_frame(frame)
 
         # Encode for MJPEG stream
         _, jpeg = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 70])
         with _frame_lock:
             _latest_frame = jpeg.tobytes()
 
-        # Emit sign detection + feed into pipeline
-        if sign:
-            socketio.emit("sign_update", {
-                "sign": sign,
-                "confidence": round(conf, 3),
-                "mode": mode,
+        # Send live prediction to UI (what model currently thinks, even mid-sign)
+        frame_n += 1
+        if frame_n % 5 == 0:  # throttle to ~6 updates/sec
+            live_sign, live_conf, live_top5 = sign_router.get_live_display()
+            if live_sign:
+                socketio.emit("sign_update", {
+                    "sign": live_sign,
+                    "confidence": round(live_conf, 3),
+                    "mode": "word",
+                })
+
+        # Only feed pipeline when a sign is COMMITTED (hands dropped after signing)
+        if committed_sign:
+            socketio.emit("sign_committed", {
+                "sign": committed_sign,
+                "confidence": round(committed_conf, 3),
             })
-            pipeline.on_sign(sign, mode)
+            pipeline.on_sign(committed_sign, committed_mode)
 
     cap.release()
     sign_router.close()
@@ -154,6 +172,19 @@ def video_feed():
                 yield (b"--frame\r\n"
                        b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n")
             time.sleep(0.033)  # ~30 fps cap
+    return Response(generate(), mimetype="multipart/x-mixed-replace; boundary=frame")
+
+
+@app.route("/avatar_feed")
+def avatar_feed():
+    """MJPEG stream of the signing avatar animation."""
+    def generate():
+        while _running:
+            frame = avatar_controller.get_frame()
+            _, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            yield (b"--frame\r\n"
+                   b"Content-Type: image/jpeg\r\n\r\n" + jpeg.tobytes() + b"\r\n")
+            time.sleep(0.033)
     return Response(generate(), mimetype="multipart/x-mixed-replace; boundary=frame")
 
 

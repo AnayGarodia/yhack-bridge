@@ -74,7 +74,7 @@ body {
 
 /* Left panel — webcam */
 .panel-left {
-  width: 35%;
+  width: 28%;
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
@@ -126,9 +126,54 @@ body {
   color: var(--text-secondary);
 }
 
+/* Center panel — avatar */
+.panel-center {
+  width: 30%;
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  padding: 16px;
+  gap: 12px;
+}
+.avatar-wrap {
+  border-radius: 12px;
+  overflow: hidden;
+  background: #141414;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.avatar-wrap img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+.avatar-status {
+  background: var(--surface);
+  border-radius: 12px;
+  padding: 12px 16px;
+  border: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+}
+.avatar-status .avatar-label {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+.avatar-status .avatar-queue {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
 /* Right panel — conversation */
 .panel-right {
-  width: 65%;
+  width: 42%;
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -304,6 +349,17 @@ body {
     </div>
   </div>
 
+  <!-- Center: avatar -->
+  <div class="panel-center">
+    <div class="avatar-wrap">
+      <img id="avatar" src="/avatar_feed" alt="ASL Avatar">
+    </div>
+    <div class="avatar-status">
+      <div class="avatar-label" id="avatar-sign">Avatar Idle</div>
+      <div class="avatar-queue" id="avatar-queue"></div>
+    </div>
+  </div>
+
   <!-- Right: conversation -->
   <div class="panel-right">
     <div class="now-recognizing" id="now-recognizing">
@@ -342,15 +398,17 @@ const el = {
   buildingSentence: document.getElementById('building-sentence'),
   micBtn: document.getElementById('mic-btn'),
   micLabel: document.getElementById('mic-label'),
+  avatarSign: document.getElementById('avatar-sign'),
+  avatarQueue: document.getElementById('avatar-queue'),
 };
 
 // Track building tokens for the "now recognizing" line
 let currentTokens = [];
 let signTimeout = null;
 
-// ── Sign updates (real-time, every detection) ────────────────────────────
+// ── Live sign updates (what model currently thinks, shown during signing) ──
 socket.on('sign_update', (data) => {
-  // Update sign display
+  // Update sign display with live prediction
   el.currentSign.textContent = data.sign;
   el.currentSign.className = 'current-sign ' + data.mode;
 
@@ -359,14 +417,7 @@ socket.on('sign_update', (data) => {
   el.confFill.style.width = pct + '%';
   el.confFill.style.background = pct > 60 ? '#22c55e' : pct > 40 ? '#f59e0b' : '#ef4444';
 
-  // Mode hint
-  const modeLabel = data.mode === 'word' ? 'Word Recognition' : 'Fingerspelling';
-  el.modeHint.textContent = 'Mode: ' + modeLabel;
-
-  // Building tokens display
-  currentTokens.push(data.sign);
-  el.buildingTokens.textContent = currentTokens.join(' ');
-  el.buildingSentence.innerHTML = '<span class="tokens">' + currentTokens.join(' ... ') + '</span>';
+  el.modeHint.textContent = 'Recognizing...';
 
   // Reset after idle
   clearTimeout(signTimeout);
@@ -374,14 +425,25 @@ socket.on('sign_update', (data) => {
     el.currentSign.textContent = 'Waiting for signs...';
     el.currentSign.className = 'current-sign idle';
     el.confFill.style.width = '0%';
-    el.modeHint.textContent = 'Mode: Auto';
-  }, 3000);
+    el.modeHint.textContent = 'Show a sign to the camera';
+  }, 2000);
+});
+
+// ── Sign committed (sign completed — hands dropped after gesture) ────────
+socket.on('sign_committed', (data) => {
+  // Add to building tokens
+  currentTokens.push(data.sign);
+  el.buildingTokens.textContent = currentTokens.join(' ');
+  el.buildingSentence.innerHTML = '<span class="tokens">' + currentTokens.join(' ') + '</span>';
+
+  // Flash the committed word
+  el.currentSign.textContent = '✓ ' + data.sign;
+  el.currentSign.className = 'current-sign word';
 });
 
 // ── Sentence complete (pipeline flushed → translated) ────────────────────
 socket.on('sentence_complete', (data) => {
   addMessage('signer', data.glosses, data.english);
-  // Clear building tokens
   currentTokens = [];
   el.buildingTokens.textContent = '-';
   el.buildingSentence.innerHTML = '';
@@ -390,6 +452,23 @@ socket.on('sentence_complete', (data) => {
 // ── Speech transcribed (hearing person spoke) ────────────────────────────
 socket.on('speech_transcribed', (data) => {
   addMessage('speaker', data.english, data.asl_glosses.join(' '));
+  // Update avatar status with queued glosses
+  el.avatarSign.textContent = 'Signing: ' + data.asl_glosses[0];
+  el.avatarQueue.textContent = data.asl_glosses.length + ' signs queued';
+});
+
+// ── Avatar status updates ───────────────────────────────────────────────
+socket.on('avatar_status', (data) => {
+  if (data.current_sign) {
+    el.avatarSign.textContent = 'Signing: ' + data.current_sign;
+  } else {
+    el.avatarSign.textContent = 'Avatar Idle';
+  }
+  if (data.queue_length > 0) {
+    el.avatarQueue.textContent = data.queue_length + ' remaining';
+  } else {
+    el.avatarQueue.textContent = '';
+  }
 });
 
 // ── Mic status ───────────────────────────────────────────────────────────
