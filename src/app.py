@@ -419,12 +419,16 @@ def handle_test_avatar(data):
     print(f"[test] glosses: {glosses}")
     socketio.emit("speech_transcribed", {"english": text, "asl_glosses": glosses})
     for gloss in glosses:
-        anim = sign_animator.get_animation(gloss)
-        socketio.emit("avatar_sign", {
-            "sign": gloss,
-            "type": anim["type"],
-            "content": anim["content"],
-        })
+        try:
+            anim = sign_animator.get_animation(gloss)
+            socketio.emit("avatar_sign", {
+                "sign": gloss,
+                "type": anim["type"],
+                "content": anim.get("content", ""),
+                "frames": anim.get("frames", []),
+            })
+        except Exception as e:
+            print(f"[test] error for {gloss}: {e}")
         time.sleep(0.1)
 
 
