@@ -6,7 +6,6 @@
 <title>Bridge — ASL Translator</title>
 <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
-<script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
 <style>
 :root {
   --bg: #0c0e14;
@@ -556,7 +555,6 @@ body {
       <div class="avatar-label" id="avatar-sign">Idle</div>
       <div class="avatar-queue" id="avatar-queue"></div>
     </div>
-    <div id="hand-3d" style="height:180px;border-radius:10px;overflow:hidden;background:var(--surface);border:1px solid var(--border);flex-shrink:0"></div>
   </div>
 
   <!-- Right: conversation -->
@@ -956,83 +954,6 @@ socket.on('sign_committed', (data) => {
   try { commitSound.currentTime = 0; commitSound.play().catch(()=>{}); } catch(e) {}
 });
 
-// ── Plotly 3D Hand Visualization ────────────────────────────────────────
-const HAND_CONN = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[0,9],[9,10],[10,11],[11,12],[0,13],[13,14],[14,15],[15,16],[0,17],[17,18],[18,19],[19,20]];
-let hand3dInitialized = false;
-
-function initHand3D() {
-  const layout = {
-    scene: {
-      xaxis: {visible:false,range:[0,1]}, yaxis: {visible:false,range:[0,1]}, zaxis: {visible:false,range:[0.3,0.7]},
-      bgcolor: 'rgba(0,0,0,0)',
-      camera: {eye:{x:0,y:0,z:-1.8}, up:{x:0,y:-1,z:0}},
-    },
-    paper_bgcolor: 'rgba(20,24,36,1)',
-    plot_bgcolor: 'rgba(20,24,36,1)',
-    margin: {l:0,r:0,t:0,b:0},
-    showlegend: false,
-  };
-  Plotly.newPlot('hand-3d', [], layout, {displayModeBar:false, responsive:true});
-  hand3dInitialized = true;
-}
-
-function updateHand3D(handData) {
-  if (!handData || handData.length === 0) return;
-  if (!hand3dInitialized) initHand3D();
-
-  const frame = handData[0]; // show first keyframe
-  const traces = [];
-
-  for (const [side, color] of [['right','#73daca'],['left','#7aa2f7']]) {
-    const pts = frame[side];
-    if (!pts || pts.length < 21) continue;
-
-    // Joint points
-    traces.push({
-      type:'scatter3d', mode:'markers',
-      x: pts.map(p=>p[0]), y: pts.map(p=>p[1]), z: pts.map(p=>p[2]),
-      marker: {size:4, color:color, opacity:0.9},
-      hoverinfo:'skip',
-    });
-
-    // Connection lines
-    const lx=[],ly=[],lz=[];
-    for (const [a,b] of HAND_CONN) {
-      if (a<pts.length && b<pts.length) {
-        lx.push(pts[a][0],pts[b][0],null);
-        ly.push(pts[a][1],pts[b][1],null);
-        lz.push(pts[a][2],pts[b][2],null);
-      }
-    }
-    traces.push({
-      type:'scatter3d', mode:'lines',
-      x:lx, y:ly, z:lz,
-      line: {color:color, width:3},
-      hoverinfo:'skip',
-    });
-
-    // Fingertip highlights
-    const tips = [4,8,12,16,20];
-    traces.push({
-      type:'scatter3d', mode:'markers',
-      x: tips.map(i=>pts[i][0]), y: tips.map(i=>pts[i][1]), z: tips.map(i=>pts[i][2]),
-      marker: {size:6, color:'white', opacity:0.7, line:{color:color,width:1}},
-      hoverinfo:'skip',
-    });
-  }
-
-  Plotly.react('hand-3d', traces, undefined, {displayModeBar:false});
-}
-
-// Hook into avatar_sign events
-socket.on('avatar_sign', (data) => {
-  if (data.hand_data && data.hand_data.length > 0) {
-    updateHand3D(data.hand_data);
-  }
-});
-
-// Initialize on load
-setTimeout(initHand3D, 1000);
 </script>
 </body>
 </html>

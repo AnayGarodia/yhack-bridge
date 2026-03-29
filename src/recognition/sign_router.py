@@ -176,7 +176,7 @@ class SignRouter:
 
         # 3. Run async inference + collect predictions
         self._word_clf.maybe_run_async()
-        (raw_sign, raw_conf), top5 = self._word_clf.get_async_result()
+        (raw_sign, raw_conf), top5 = self._word_clf.get_raw_async_result()
 
         if raw_sign is not None:
             self._live_sign = raw_sign
