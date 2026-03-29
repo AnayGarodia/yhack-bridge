@@ -327,6 +327,52 @@ def _f(rx, ry, rh, lx=None, ly=None, lh=None, desc=""):
     l = {"x": lx, "y": ly, **(lh or {})} if lx else _REST_L
     return {"right_hand": r, "left_hand": l, "description": desc}
 
+def hand_config_to_landmarks(hand: dict) -> list[list[float]]:
+    """Convert a hand config dict (finger states + x,y) to 21 MediaPipe-style 3D landmarks.
+
+    Returns list of 21 [x, y, z] points normalized ~0-1 range.
+    """
+    cx = hand.get("x", 200) / 400.0  # normalize to 0-1
+    cy = hand.get("y", 300) / 500.0
+
+    # Wrist at hand center
+    landmarks = [[cx, cy, 0.5]]  # index 0: wrist
+
+    finger_defs = [
+        ("thumb",  [-0.08, -0.01], 0.06, -50),
+        ("index",  [-0.03, -0.06], 0.08, -10),
+        ("middle", [-0.01, -0.06], 0.09,   0),
+        ("ring",   [ 0.02, -0.06], 0.08,   8),
+        ("pinky",  [ 0.04, -0.06], 0.07,  15),
+    ]
+
+    for fname, base_off, length, angle_deg in finger_defs:
+        state = hand.get(fname, "curled")
+        bx = cx + base_off[0]
+        by = cy + base_off[1]
+        rad = math.radians(angle_deg)
+
+        if state == "extended":
+            segs = [0.35, 0.3, 0.2, 0.15]
+        elif state == "bent":
+            segs = [0.35, 0.2, 0.05, -0.05]
+        else:  # curled
+            segs = [0.15, 0.02, -0.05, -0.08]
+
+        px, py = bx, by
+        for i, seg_frac in enumerate(segs):
+            seg_len = length * seg_frac if state != "curled" else length * abs(seg_frac)
+            dx = seg_len * math.sin(rad)
+            dy = -seg_len * math.cos(rad)
+            if state == "curled" and i >= 2:
+                dy = abs(dy) * 0.5  # curl back toward palm
+            px = px + dx
+            py = py + dy
+            landmarks.append([round(px, 4), round(py, 4), round(0.5 + i * 0.02, 4)])
+
+    return landmarks
+
+
 def _interpolate_frames(frames: list[dict]) -> list[dict]:
     """Double the frame count by inserting midpoints between each pair of keyframes."""
     if len(frames) <= 1:
@@ -1163,7 +1209,17 @@ class SignAnimator:
             if len(raw) <= 6:
                 frames = _interpolate_frames(frames)
             svgs = [_build_sign_svg(f, label=key) for f in frames]
-            result = {"type": "svg_multi", "frames": svgs, "content": svgs[0]}
+            # Compute 3D hand landmarks for each keyframe (not interpolated — too many)
+            hand_data = []
+            for kf in raw:
+                rh = kf.get("right_hand", {})
+                lh = kf.get("left_hand", {})
+                hand_data.append({
+                    "right": hand_config_to_landmarks(rh),
+                    "left": hand_config_to_landmarks(lh),
+                })
+            result = {"type": "svg_multi", "frames": svgs, "content": svgs[0],
+                      "hand_data": hand_data}
         else:
             # AI fallback for unknown signs
             config = self._get_hand_config(key)

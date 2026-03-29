@@ -167,6 +167,7 @@ def _stt_flush_loop():
                         "type": anim["type"],
                         "content": anim.get("content", ""),
                         "frames": anim.get("frames", []),
+                        "hand_data": anim.get("hand_data", []),
                     })
                 except Exception as e:
                     print(f"[avatar] error for {gloss}: {e}")
