@@ -297,9 +297,8 @@ def _avatar_render_loop():
                 with _avatar_frame_lock:
                     _avatar_frame = jpeg.tobytes()
 
-                # Send avatar to virtual camera for Google Meet
+                # Send bot frame to virtual camera for Google Meet
                 if bridge_cam.is_running:
-                    bridge_cam.update_avatar(frame)
                     bridge_cam.send_composed_frame()
             except Exception as e:
                 print(f"[rpm] render error: {e}")
