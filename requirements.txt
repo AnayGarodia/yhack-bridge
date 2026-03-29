@@ -31,3 +31,4 @@ pyttsx3==2.98
 sounddevice==0.5.5
 urllib3==2.6.3
 Werkzeug==3.1.7
+flask-socketio

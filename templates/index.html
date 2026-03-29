@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Bridge — ASL Translator</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+<style>
+:root {
+  --bg: #0a0a0a;
+  --surface: #1a1a1a;
+  --surface-hover: #222222;
+  --blue: #2563eb;
+  --gray: #374151;
+  --text: #ffffff;
+  --text-secondary: #9ca3af;
+  --green: #22c55e;
+  --red: #ef4444;
+  --border: #2a2a2a;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: 'Inter', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ── Top bar ─────────────────────────────────────── */
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 24px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.topbar-left { display: flex; align-items: baseline; gap: 12px; }
+.topbar-left h1 { font-size: 22px; font-weight: 700; letter-spacing: -0.5px; }
+.topbar-left span { font-size: 13px; color: var(--text-secondary); }
+.topbar-right { display: flex; align-items: center; gap: 16px; }
+.status-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--green);
+  display: inline-block;
+  animation: pulse 2s infinite;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+.status-label { font-size: 12px; color: var(--text-secondary); display: flex; align-items: center; gap: 6px; }
+.mode-badge {
+  font-size: 11px;
+  padding: 3px 10px;
+  border-radius: 20px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+}
+
+/* ── Main area ───────────────────────────────────── */
+.main {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+/* Left panel — webcam */
+.panel-left {
+  width: 35%;
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  padding: 16px;
+  gap: 12px;
+}
+.webcam-wrap {
+  border-radius: 12px;
+  overflow: hidden;
+  background: #111;
+  flex-shrink: 0;
+}
+.webcam-wrap img {
+  width: 100%;
+  display: block;
+}
+.sign-display {
+  background: var(--surface);
+  border-radius: 12px;
+  padding: 16px;
+  text-align: center;
+  border: 1px solid var(--border);
+}
+.sign-display .current-sign {
+  font-size: 36px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  min-height: 48px;
+  transition: all 0.15s;
+}
+.sign-display .current-sign.word { color: var(--green); }
+.sign-display .current-sign.letter { color: #f59e0b; }
+.sign-display .current-sign.idle { color: var(--text-secondary); font-size: 16px; font-weight: 400; }
+.confidence-bar {
+  margin-top: 8px;
+  height: 4px;
+  border-radius: 2px;
+  background: #333;
+  overflow: hidden;
+}
+.confidence-bar .fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.2s, background 0.2s;
+}
+.mode-hint {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+/* Right panel — conversation */
+.panel-right {
+  width: 65%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.now-recognizing {
+  padding: 8px 20px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border);
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+.now-recognizing .tokens { color: #f59e0b; margin-left: 6px; }
+.conversation {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* Chat bubbles */
+.message {
+  max-width: 75%;
+  animation: fadeIn 0.3s ease-out;
+}
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.message.signer { align-self: flex-start; }
+.message.speaker { align-self: flex-end; }
+.msg-header {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.message.speaker .msg-header { justify-content: flex-end; }
+.msg-bubble {
+  padding: 12px 16px;
+  border-radius: 16px;
+  line-height: 1.5;
+}
+.message.signer .msg-bubble {
+  background: var(--blue);
+  border-bottom-left-radius: 4px;
+}
+.message.speaker .msg-bubble {
+  background: var(--gray);
+  border-bottom-right-radius: 4px;
+}
+.msg-glosses {
+  font-size: 11px;
+  opacity: 0.7;
+  font-family: 'Inter', monospace;
+  letter-spacing: 0.5px;
+}
+.msg-english { font-size: 15px; }
+.message.signer .msg-glosses { margin-bottom: 4px; }
+.message.speaker .msg-glosses { margin-top: 4px; }
+
+.empty-state {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+  font-size: 14px;
+  text-align: center;
+  line-height: 1.8;
+}
+
+/* ── Bottom bar ──────────────────────────────────── */
+.bottombar {
+  display: flex;
+  align-items: center;
+  padding: 12px 24px;
+  border-top: 1px solid var(--border);
+  gap: 16px;
+  flex-shrink: 0;
+}
+.mic-btn {
+  width: 48px; height: 48px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  background: var(--surface);
+  color: var(--text-secondary);
+  font-size: 20px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+  flex-shrink: 0;
+}
+.mic-btn:hover { border-color: var(--text-secondary); }
+.mic-btn.active {
+  background: var(--red);
+  border-color: var(--red);
+  color: white;
+  animation: pulse 1.5s infinite;
+}
+.mic-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+.building-sentence {
+  flex: 1;
+  font-size: 13px;
+  color: var(--text-secondary);
+  text-align: center;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.building-sentence .tokens { color: #f59e0b; }
+.bar-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.bar-btn {
+  padding: 6px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-family: 'Inter', sans-serif;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.bar-btn:hover { background: var(--surface-hover); color: var(--text); }
+
+/* scrollbar */
+.conversation::-webkit-scrollbar { width: 6px; }
+.conversation::-webkit-scrollbar-track { background: transparent; }
+.conversation::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<!-- ── Top bar ──────────────────────────────────────── -->
+<div class="topbar">
+  <div class="topbar-left">
+    <h1>Bridge</h1>
+    <span>Real-time ASL Translator</span>
+  </div>
+  <div class="topbar-right">
+    <div class="status-label"><span class="status-dot"></span> Running locally</div>
+    <div class="mode-badge" id="mode-badge">Auto</div>
+  </div>
+</div>
+
+<!-- ── Main ─────────────────────────────────────────── -->
+<div class="main">
+  <!-- Left: webcam -->
+  <div class="panel-left">
+    <div class="webcam-wrap">
+      <img id="webcam" src="/video_feed" alt="Webcam feed">
+    </div>
+    <div class="sign-display">
+      <div class="current-sign idle" id="current-sign">Waiting for signs...</div>
+      <div class="confidence-bar"><div class="fill" id="conf-fill"></div></div>
+      <div class="mode-hint" id="mode-hint">Mode: Auto</div>
+    </div>
+  </div>
+
+  <!-- Right: conversation -->
+  <div class="panel-right">
+    <div class="now-recognizing" id="now-recognizing">
+      Recognizing: <span class="tokens" id="building-tokens">-</span>
+    </div>
+    <div class="conversation" id="conversation">
+      <div class="empty-state" id="empty-state">
+        Sign at the camera or click the mic to start a conversation.
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Bottom bar ───────────────────────────────────── -->
+<div class="bottombar">
+  <button class="mic-btn" id="mic-btn" title="Toggle microphone">&#x1f3a4;</button>
+  <span class="mic-label" id="mic-label">Tap to listen</span>
+  <div class="building-sentence" id="building-sentence"></div>
+  <div class="bar-actions">
+    <button class="bar-btn" id="clear-btn">Clear</button>
+    <button class="bar-btn" id="export-btn">Export</button>
+  </div>
+</div>
+
+<script>
+const socket = io();
+
+const el = {
+  currentSign: document.getElementById('current-sign'),
+  confFill: document.getElementById('conf-fill'),
+  modeHint: document.getElementById('mode-hint'),
+  modeBadge: document.getElementById('mode-badge'),
+  conversation: document.getElementById('conversation'),
+  emptyState: document.getElementById('empty-state'),
+  buildingTokens: document.getElementById('building-tokens'),
+  buildingSentence: document.getElementById('building-sentence'),
+  micBtn: document.getElementById('mic-btn'),
+  micLabel: document.getElementById('mic-label'),
+};
+
+// Track building tokens for the "now recognizing" line
+let currentTokens = [];
+let signTimeout = null;
+
+// ── Sign updates (real-time, every detection) ────────────────────────────
+socket.on('sign_update', (data) => {
+  // Update sign display
+  el.currentSign.textContent = data.sign;
+  el.currentSign.className = 'current-sign ' + data.mode;
+
+  // Confidence bar
+  const pct = Math.round(data.confidence * 100);
+  el.confFill.style.width = pct + '%';
+  el.confFill.style.background = pct > 60 ? '#22c55e' : pct > 40 ? '#f59e0b' : '#ef4444';
+
+  // Mode hint
+  const modeLabel = data.mode === 'word' ? 'Word Recognition' : 'Fingerspelling';
+  el.modeHint.textContent = 'Mode: ' + modeLabel;
+
+  // Building tokens display
+  currentTokens.push(data.sign);
+  el.buildingTokens.textContent = currentTokens.join(' ');
+  el.buildingSentence.innerHTML = '<span class="tokens">' + currentTokens.join(' ... ') + '</span>';
+
+  // Reset after idle
+  clearTimeout(signTimeout);
+  signTimeout = setTimeout(() => {
+    el.currentSign.textContent = 'Waiting for signs...';
+    el.currentSign.className = 'current-sign idle';
+    el.confFill.style.width = '0%';
+    el.modeHint.textContent = 'Mode: Auto';
+  }, 3000);
+});
+
+// ── Sentence complete (pipeline flushed → translated) ────────────────────
+socket.on('sentence_complete', (data) => {
+  addMessage('signer', data.glosses, data.english);
+  // Clear building tokens
+  currentTokens = [];
+  el.buildingTokens.textContent = '-';
+  el.buildingSentence.innerHTML = '';
+});
+
+// ── Speech transcribed (hearing person spoke) ────────────────────────────
+socket.on('speech_transcribed', (data) => {
+  addMessage('speaker', data.english, data.asl_glosses.join(' '));
+});
+
+// ── Mic status ───────────────────────────────────────────────────────────
+socket.on('mic_status', (data) => {
+  if (data.active) {
+    el.micBtn.classList.add('active');
+    el.micLabel.textContent = 'Listening...';
+  } else {
+    el.micBtn.classList.remove('active');
+    el.micLabel.textContent = 'Tap to listen';
+  }
+});
+
+// ── Conversation cleared ─────────────────────────────────────────────────
+socket.on('conversation_cleared', () => {
+  el.conversation.innerHTML = '';
+  el.emptyState = null;
+  currentTokens = [];
+  el.buildingTokens.textContent = '-';
+  el.buildingSentence.innerHTML = '';
+});
+
+// ── Add message to conversation ──────────────────────────────────────────
+function addMessage(type, primary, secondary) {
+  // Remove empty state
+  const empty = document.getElementById('empty-state');
+  if (empty) empty.remove();
+
+  const msg = document.createElement('div');
+  msg.className = 'message ' + type;
+
+  if (type === 'signer') {
+    msg.innerHTML =
+      '<div class="msg-header">\ud83e\udd1f Signer</div>' +
+      '<div class="msg-bubble">' +
+        '<div class="msg-glosses">' + escHtml(primary) + '</div>' +
+        '<div class="msg-english">' + escHtml(secondary) + '</div>' +
+      '</div>';
+  } else {
+    msg.innerHTML =
+      '<div class="msg-header">\ud83c\udfa4 Speaker</div>' +
+      '<div class="msg-bubble">' +
+        '<div class="msg-english">' + escHtml(primary) + '</div>' +
+        '<div class="msg-glosses">' + escHtml(secondary) + '</div>' +
+      '</div>';
+  }
+
+  el.conversation.appendChild(msg);
+  el.conversation.scrollTop = el.conversation.scrollHeight;
+}
+
+function escHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+// ── Button handlers ──────────────────────────────────────────────────────
+el.micBtn.addEventListener('click', () => socket.emit('toggle_mic'));
+
+document.getElementById('clear-btn').addEventListener('click', () => {
+  socket.emit('clear_conversation');
+  el.conversation.innerHTML =
+    '<div class="empty-state" id="empty-state">' +
+      'Sign at the camera or click the mic to start a conversation.' +
+    '</div>';
+});
+
+document.getElementById('export-btn').addEventListener('click', () => {
+  const msgs = el.conversation.querySelectorAll('.message');
+  let text = 'Bridge — Conversation Transcript\n' + '='.repeat(40) + '\n\n';
+  msgs.forEach(m => {
+    const who = m.classList.contains('signer') ? 'Signer' : 'Speaker';
+    const eng = m.querySelector('.msg-english')?.textContent || '';
+    const gloss = m.querySelector('.msg-glosses')?.textContent || '';
+    text += who + ': ' + eng + '\n';
+    text += '  (' + gloss + ')\n\n';
+  });
+  const blob = new Blob([text], { type: 'text/plain' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'bridge-transcript.txt';
+  a.click();
+});
+
+// Keyboard shortcut: space to toggle mic
+document.addEventListener('keydown', (e) => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+  if (e.code === 'Space') {
+    e.preventDefault();
+    socket.emit('toggle_mic');
+  }
+});
+</script>
+</body>
+</html>
