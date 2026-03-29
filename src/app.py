@@ -114,7 +114,7 @@ _avatar_frame: bytes | None = None
 _avatar_frame_lock = threading.Lock()
 
 # ── Google Meet Virtual Camera ───────────────────────────────────────────────
-bridge_cam = BridgeCamera(width=1280, height=720, fps=30)
+bridge_cam = BridgeCamera(width=1280, height=720, fps=30, sign_animator=sign_animator)
 
 # ── STT with word-buffering callback ─────────────────────────────────────────
 _stt_word_buffer: list[str] = []
@@ -150,6 +150,7 @@ def _stt_flush_loop():
             print(f"[stt] glosses: {glosses}")
             socketio.emit("speech_transcribed", {"english": sentence, "asl_glosses": glosses})
             bridge_cam.set_speaker_text(sentence, " ".join(glosses))
+            bridge_cam.queue_signs(glosses)
             _stats["words_spoken"] += len(sentence.split())
 
             # Feed glosses to RPM avatar controller (3D) if available
