@@ -327,6 +327,32 @@ def _f(rx, ry, rh, lx=None, ly=None, lh=None, desc=""):
     l = {"x": lx, "y": ly, **(lh or {})} if lx else _REST_L
     return {"right_hand": r, "left_hand": l, "description": desc}
 
+def _interpolate_frames(frames: list[dict]) -> list[dict]:
+    """Double the frame count by inserting midpoints between each pair of keyframes."""
+    if len(frames) <= 1:
+        return frames
+    result = []
+    for i in range(len(frames) - 1):
+        result.append(frames[i])
+        # Create midpoint frame
+        a = frames[i]
+        b = frames[i + 1]
+        mid = {}
+        for hand_key in ("right_hand", "left_hand"):
+            ah = a.get(hand_key, {})
+            bh = b.get(hand_key, {})
+            mh = {}
+            for k in ah:
+                if k in ("x", "y") and k in bh:
+                    mh[k] = int((ah[k] + bh[k]) / 2)
+                else:
+                    mh[k] = ah[k]
+            mid[hand_key] = mh
+        mid["description"] = ""
+        result.append(mid)
+    result.append(frames[-1])
+    return result
+
 # ── Hardcoded ASL sign definitions — 4-6 frames per sign for smooth motion ──
 _HARDCODED_SIGNS = {
     "HELLO": [
@@ -1088,7 +1114,7 @@ class SignAnimator:
 
         # Check hardcoded signs first (multi-frame, accurate)
         if key in _HARDCODED_SIGNS:
-            frames = _HARDCODED_SIGNS[key]
+            frames = _interpolate_frames(_HARDCODED_SIGNS[key])
             svgs = [_build_sign_svg(f, label=key) for f in frames]
             result = {"type": "svg_multi", "frames": svgs, "content": svgs[0]}
         else:

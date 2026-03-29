@@ -274,7 +274,7 @@ body {
   align-items: center;
   justify-content: center;
   opacity: 0;
-  transition: opacity 0.15s ease-in-out;
+  transition: opacity 0.08s ease-in-out;
   padding: 8px;
 }
 .avatar-svg.active { opacity: 1; }
@@ -775,12 +775,12 @@ function avatarPlayNext() {
   if (type === 'svg_multi' && frames.length > 1) {
     // Multi-frame sign: cycle through frames with crossfade
     let frameIdx = 0;
-    const frameTime = 280;  // 280ms per frame — smooth but readable
+    const frameTime = 150;  // 150ms per frame — fast and fluid
 
     function showNextFrame() {
       if (frameIdx >= frames.length) {
         // Done with this sign, move to next
-        setTimeout(avatarPlayNext, 200);
+        setTimeout(avatarPlayNext, 100);
         return;
       }
       avatarShowFrame(frames[frameIdx], sign);
@@ -792,7 +792,7 @@ function avatarPlayNext() {
     // Single frame sign
     const content = item.content || (frames.length > 0 ? frames[0] : '');
     avatarShowFrame(content, sign);
-    setTimeout(avatarPlayNext, 1200);
+    setTimeout(avatarPlayNext, 600);
   }
 }
 
