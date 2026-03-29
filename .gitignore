@@ -3,3 +3,8 @@ __pycache__/
 *.pyc
 .env
 .DS_Store
+
+# Large model/data files (downloadable, don't commit)
+models/model.tflite
+src/recognition/holistic_landmarker.task
+src/recognition/wlasl_weights/
