@@ -1,4 +1,7 @@
 absl-py==2.4.0
+# TFLite inference (use tflite-runtime for lightweight, or tensorflow as fallback)
+# tflite-runtime>=2.14.0
+tensorflow>=2.14.0
 blinker==1.9.0
 certifi==2026.2.25
 cffi==2.0.0
@@ -21,6 +24,9 @@ opencv-contrib-python==4.13.0.92
 opencv-python==4.13.0.92
 packaging==26.0
 pillow==12.1.1
+# Virtual camera: requires OBS Virtual Camera (macOS/Windows) or v4l2loopback (Linux).
+# See docs/virtual_camera_setup.md for OS-specific backend setup.
+pyvirtualcam>=0.4.0
 pycparser==3.0
 pyparsing==3.3.2
 python-dateutil==2.9.0.post0
