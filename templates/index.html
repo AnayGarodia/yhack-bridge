@@ -421,12 +421,8 @@ body {
   <!-- Center: avatar -->
   <div class="panel-center">
     <div class="avatar-wrap" id="avatar-container">
-      <!-- 3D RPM avatar (MJPEG stream) — shown when RPM is active -->
-      <img id="avatar-3d" src="/avatar_feed" alt="3D Avatar"
-           style="width:100%;height:100%;object-fit:contain;border-radius:8px;display:block"/>
-      <!-- SVG fallback layers (hidden when 3D is active) -->
-      <div class="avatar-svg" id="avatar-svg-a" style="display:none"></div>
-      <div class="avatar-svg" id="avatar-svg-b" style="display:none"></div>
+      <div class="avatar-svg active idle" id="avatar-svg-a"></div>
+      <div class="avatar-svg" id="avatar-svg-b"></div>
       <div class="avatar-sign-label" id="avatar-sign-label"></div>
     </div>
     <div class="avatar-status">
@@ -453,6 +449,8 @@ body {
   <button class="mic-btn" id="mic-btn" title="Toggle microphone">&#x1f3a4;</button>
   <span class="mic-label" id="mic-label">Tap to listen</span>
   <div class="building-sentence" id="building-sentence"></div>
+  <input type="text" id="test-input" placeholder="Type a word to test avatar..."
+         style="flex:1;padding:8px 12px;border-radius:8px;border:1px solid #333;background:#1a1a1a;color:#fff;font-size:13px;font-family:Inter,sans-serif;outline:none"/>
   <div class="bar-actions">
     <button class="bar-btn" id="clear-btn">Clear</button>
     <button class="bar-btn" id="export-btn">Export</button>
@@ -571,6 +569,21 @@ socket.on('avatar_sign', (data) => {
   if (!avatarIsAnimating) avatarPlayNext();
 });
 
+function avatarShowFrame(svgContent, sign) {
+  const next = avatarCurrentLayer === 'a' ? 'b' : 'a';
+  const nextEl = document.getElementById('avatar-svg-' + next);
+  const currEl = document.getElementById('avatar-svg-' + avatarCurrentLayer);
+
+  nextEl.innerHTML = svgContent;
+  nextEl.classList.remove('idle');
+  nextEl.classList.add('active');
+  currEl.classList.remove('active', 'idle');
+  avatarCurrentLayer = next;
+
+  document.getElementById('avatar-sign-label').textContent = sign;
+  el.avatarSign.textContent = 'Signing: ' + sign;
+}
+
 function avatarPlayNext() {
   clearTimeout(avatarIdleTimeout);
 
@@ -586,34 +599,34 @@ function avatarPlayNext() {
   avatarIsAnimating = true;
   const item = avatarSignQueue.shift();
   const sign = item.sign;
-  const content = item.content;
   const type = item.type || 'svg';
+  const frames = item.frames || [];
 
-  const next = avatarCurrentLayer === 'a' ? 'b' : 'a';
-  const nextEl = document.getElementById('avatar-svg-' + next);
-  const currEl = document.getElementById('avatar-svg-' + avatarCurrentLayer);
-
-  // Display content based on type
-  if (type === 'gif') {
-    nextEl.innerHTML = '<img src="' + content + '" alt="' + sign + '" style="width:100%;height:100%;object-fit:contain;border-radius:8px"/>';
-  } else {
-    nextEl.innerHTML = content;
-  }
-
-  nextEl.classList.remove('idle');
-  nextEl.classList.add('active');
-  currEl.classList.remove('active', 'idle');
-  avatarCurrentLayer = next;
-
-  document.getElementById('avatar-sign-label').textContent = sign;
-  el.avatarSign.textContent = 'Signing: ' + sign;
   el.avatarQueue.textContent = avatarSignQueue.length > 0
     ? avatarSignQueue.length + ' remaining' : '';
 
-  // Animated SVGs play their own @keyframes (0.8s), then hold
-  // GIFs loop on their own. Hold each sign 1.2s total then advance.
-  const holdTime = type === 'gif' ? 1500 : 1200;
-  setTimeout(avatarPlayNext, holdTime);
+  if (type === 'svg_multi' && frames.length > 1) {
+    // Multi-frame sign: cycle through frames with crossfade
+    let frameIdx = 0;
+    const frameTime = 400;  // 400ms per frame
+
+    function showNextFrame() {
+      if (frameIdx >= frames.length) {
+        // Done with this sign, move to next
+        setTimeout(avatarPlayNext, 200);
+        return;
+      }
+      avatarShowFrame(frames[frameIdx], sign);
+      frameIdx++;
+      setTimeout(showNextFrame, frameTime);
+    }
+    showNextFrame();
+  } else {
+    // Single frame sign
+    const content = item.content || (frames.length > 0 ? frames[0] : '');
+    avatarShowFrame(content, sign);
+    setTimeout(avatarPlayNext, 1200);
+  }
 }
 
 function avatarShowIdle() {
@@ -695,6 +708,17 @@ document.getElementById('clear-btn').addEventListener('click', () => {
     '<div class="empty-state" id="empty-state">' +
       'Sign at the camera or click the mic to start a conversation.' +
     '</div>';
+});
+
+// ── Test input: type a word and send to avatar ──────────────────────────
+document.getElementById('test-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    const text = e.target.value.trim();
+    if (text) {
+      socket.emit('test_avatar', { text: text });
+      e.target.value = '';
+    }
+  }
 });
 
 document.getElementById('export-btn').addEventListener('click', () => {

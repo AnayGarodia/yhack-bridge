@@ -48,6 +48,7 @@ from src.speech.pipeline import SpeechPipeline
 from src.translation.text_smoother import TextSmoother
 from src.translation.english_to_signs import EnglishToSigns
 from src.translation.sign_decoder import SignDecoder
+from src.output.bridge_camera import BridgeCamera
 from src.avatar.sign_animator import SignAnimator
 from src.avatar.sign_library import SignLibrary
 from src.avatar.rpm_renderer import RPMRenderer
@@ -72,6 +73,7 @@ class WebSpeechPipeline(SpeechPipeline):
                 print(f"[pipeline] speaking:  {text!r}")
                 self._tts.speak_async(text)
                 self._sio.emit("sentence_complete", {"glosses": raw, "english": text})
+                bridge_cam.set_translation(text)
                 self._history.append(text)
                 if len(self._history) > 5:
                     self._history.pop(0)
@@ -110,6 +112,9 @@ rpm_controller = None  # initialized in _avatar_render_loop thread
 _avatar_frame: bytes | None = None
 _avatar_frame_lock = threading.Lock()
 
+# ── Google Meet Virtual Camera ───────────────────────────────────────────────
+bridge_cam = BridgeCamera(width=1280, height=720, fps=30)
+
 # ── STT with word-buffering callback ─────────────────────────────────────────
 _stt_word_buffer: list[str] = []
 _stt_last_word_time = 0.0
@@ -143,6 +148,7 @@ def _stt_flush_loop():
             glosses = e2s.convert(sentence)
             print(f"[stt] glosses: {glosses}")
             socketio.emit("speech_transcribed", {"english": sentence, "asl_glosses": glosses})
+            bridge_cam.set_speaker_text(sentence)
 
             # Feed glosses to RPM avatar controller (3D) if available
             if rpm_controller is not None:
@@ -155,7 +161,8 @@ def _stt_flush_loop():
                 socketio.emit("avatar_sign", {
                     "sign": gloss,
                     "type": anim["type"],
-                    "content": anim["content"],
+                    "content": anim.get("content", ""),
+                    "frames": anim.get("frames", []),
                 })
                 time.sleep(0.1)
         except Exception as e:
@@ -212,6 +219,10 @@ def _recognition_loop():
         with _frame_lock:
             _latest_frame = jpeg.tobytes()
 
+        # Send to virtual camera for Google Meet
+        if bridge_cam.is_running:
+            bridge_cam.send_frame(annotated)
+
         frame_n += 1
         if frame_n % 5 == 0:
             live_sign, live_conf, live_top5 = sign_router.get_live_display()
@@ -225,6 +236,7 @@ def _recognition_loop():
                         for name, prob in (live_top5 or [])[:5]
                     ],
                 })
+                bridge_cam.set_sign(live_sign, live_conf)
             # Send continuously-decoded sentence preview
             live_decoded = sign_router.get_live_decoded()
             if live_decoded:
@@ -238,6 +250,7 @@ def _recognition_loop():
                 "confidence": round(committed_conf, 3),
             })
             pipeline.on_sign(committed_sign, committed_mode)
+            bridge_cam.add_committed_sign(committed_sign)
 
     cap.release()
     sign_router.close()
@@ -249,31 +262,39 @@ def _avatar_render_loop():
     """Initialize and run RPM renderer in a dedicated thread (OpenGL is thread-local)."""
     global rpm_controller, _avatar_frame
 
+    import sys as _sys
+    print("[rpm] Avatar render loop starting...", flush=True)
+
     if not _rpm_avatar_ok:
-        print("[rpm] Sign library unavailable — avatar render loop not started")
+        print("[rpm] Sign library unavailable — avatar render loop not started", flush=True)
         return
 
-    renderer = RPMRenderer("models/avatar.glb", width=1280, height=720)
-    if not renderer.load():
-        print("[rpm] Renderer load failed — avatar render loop not started")
-        return
+    try:
+        renderer = RPMRenderer("models/avatar.glb", width=1280, height=720)
+        renderer._use_3d = False
+        print("[rpm] Skeleton renderer created", flush=True)
 
-    engine = AnimationEngine()
-    ctrl = RPMAvatarController(renderer, sign_library, engine)
+        engine = AnimationEngine()
+        ctrl = RPMAvatarController(renderer, sign_library, engine)
 
-    # Make controller accessible to flush loop for queueing words
-    global rpm_controller
-    rpm_controller = ctrl
-    print("[rpm] Avatar render loop started (dedicated thread)")
+        rpm_controller = ctrl
+        print("[rpm] Avatar render loop started", flush=True)
 
-    while _running:
-        frame = ctrl.get_frame()
-        _, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
-        with _avatar_frame_lock:
-            _avatar_frame = jpeg.tobytes()
-        time.sleep(0.033)  # ~30fps
+        while _running:
+            try:
+                frame = ctrl.get_frame()
+                _, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+                with _avatar_frame_lock:
+                    _avatar_frame = jpeg.tobytes()
+            except Exception as e:
+                print(f"[rpm] render error: {e}")
+            time.sleep(0.033)
 
-    print("[rpm] Avatar render loop stopped")
+        print("[rpm] Avatar render loop stopped")
+    except Exception as e:
+        print(f"[rpm] CRASH: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -338,6 +359,27 @@ def handle_toggle_mic():
         stt.stop()
         print("[mic] stopped listening")
     socketio.emit("mic_status", {"active": _mic_active})
+    bridge_cam.set_mic_active(_mic_active)
+
+
+@socketio.on("test_avatar")
+def handle_test_avatar(data):
+    """Test input: type text, convert to glosses, send SVGs to avatar."""
+    text = data.get("text", "").strip()
+    if not text:
+        return
+    print(f"[test] input: {text!r}")
+    glosses = e2s.convert(text)
+    print(f"[test] glosses: {glosses}")
+    socketio.emit("speech_transcribed", {"english": text, "asl_glosses": glosses})
+    for gloss in glosses:
+        anim = sign_animator.get_animation(gloss)
+        socketio.emit("avatar_sign", {
+            "sign": gloss,
+            "type": anim["type"],
+            "content": anim["content"],
+        })
+        time.sleep(0.1)
 
 
 @socketio.on("clear_conversation")
@@ -357,6 +399,7 @@ def handle_set_mode(data):
 def _cleanup():
     global _running, _mic_active
     _running = False
+    bridge_cam.stop()
     pipeline.flush_now()
     pipeline.stop()
     if _mic_active:
@@ -369,9 +412,15 @@ atexit.register(_cleanup)
 # ── Entry point ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5001"))
+    # Start virtual camera for Google Meet (non-fatal if OBS not installed)
+    bridge_cam.start()
+
     threading.Thread(target=_recognition_loop, daemon=True).start()
     threading.Thread(target=_avatar_render_loop, daemon=True).start()
     threading.Thread(target=_stt_flush_loop, daemon=True).start()
     pipeline.start()
-    print(f"\n  Bridge is running at http://localhost:{port}\n")
+    print(f"\n  Bridge is running at http://localhost:{port}")
+    if bridge_cam.is_running:
+        print(f"  Virtual camera active — select it in Google Meet/Zoom")
+    print()
     socketio.run(app, host="0.0.0.0", port=port, debug=False, allow_unsafe_werkzeug=True)
