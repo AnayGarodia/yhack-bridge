@@ -23,11 +23,9 @@ import sys
 
 import requests
 
-LAVA_BASE    = "https://api.lavapayments.com/v1/forward"
-PROVIDER_URL = os.environ.get(
-    "LAVA_PROVIDER_URL", "https://api.openai.com/v1/chat/completions"
-)
-MODEL = os.environ.get("E2S_MODEL", "gpt-4o-mini")
+LAVA_BASE             = "https://api.lavapayments.com/v1/forward"
+_DEFAULT_PROVIDER_URL = os.environ.get("LAVA_PROVIDER_URL", "https://api.openai.com/v1/chat/completions")
+_DEFAULT_MODEL        = os.environ.get("E2S_MODEL", "gpt-4o-mini")
 
 _SYSTEM_PROMPT = """\
 You are an ASL (American Sign Language) gloss converter.
@@ -83,7 +81,8 @@ _DROP_WORDS = {
 
 _WORD_MAP = {
     "hello": "HELLO", "hi": "HELLO", "hey": "HELLO",
-    "thanks": "THANK-YOU", "thank": "THANK-YOU",
+    "thanks": "THANK-YOU", "thank": "THANK-YOU", "thankyou": "THANK-YOU",
+    "much": "MUCH", "very": "VERY",
     "please": "PLEASE", "yes": "YES", "yeah": "YES",
     "no": "NO", "nope": "NO", "nah": "NO",
     "help": "HELP", "sorry": "SORRY",
@@ -146,8 +145,10 @@ class EnglishToSigns:
     """
 
     def __init__(self, lava_token: str, timeout: int = 10):
-        self._lava_token = lava_token
-        self._timeout    = timeout
+        self._lava_token    = lava_token
+        self._timeout       = timeout
+        self._provider_url  = _DEFAULT_PROVIDER_URL
+        self._model         = _DEFAULT_MODEL
 
     def convert(self, english_text: str) -> list[str]:
         """
@@ -169,7 +170,7 @@ class EnglishToSigns:
 
     def _llm_convert(self, text: str) -> list[str]:
         payload = {
-            "model": MODEL,
+            "model": self._model,
             "messages": [
                 {"role": "system", "content": _SYSTEM_PROMPT},
                 {"role": "user",   "content": text},
@@ -183,7 +184,7 @@ class EnglishToSigns:
         }
         r = requests.post(
             LAVA_BASE,
-            params={"u": PROVIDER_URL},
+            params={"u": self._provider_url},
             json=payload,
             headers=headers,
             timeout=self._timeout,
@@ -218,7 +219,6 @@ if __name__ == "__main__":
         sys.exit(1)
 
     converter = EnglishToSigns(lava_token=token)
-
     test_sentences = [
         "Hello, my name is John, nice to meet you.",
         "Can you please help me? I am hungry.",
@@ -228,7 +228,7 @@ if __name__ == "__main__":
         "Thank you, I am happy to be here today.",
     ]
 
-    print(f"Model: {MODEL} via Lava\n")
+    print(f"Model: {converter._model} via Lava\n")
     for sentence in test_sentences:
         glosses = converter.convert(sentence)
         print(f"  IN:  {sentence}")
