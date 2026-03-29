@@ -775,7 +775,7 @@ function avatarPlayNext() {
   if (type === 'svg_multi' && frames.length > 1) {
     // Multi-frame sign: cycle through frames with crossfade
     let frameIdx = 0;
-    const frameTime = 150;  // 150ms per frame — fast and fluid
+    const frameTime = 80;  // 80ms per frame — very fast, smooth motion
 
     function showNextFrame() {
       if (frameIdx >= frames.length) {
