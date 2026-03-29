@@ -278,6 +278,11 @@ body {
   padding: 8px;
 }
 .avatar-svg.active { opacity: 1; }
+.avatar-wrap.signing {
+  box-shadow: 0 0 30px rgba(115, 218, 202, 0.12), 0 4px 32px rgba(0,0,0,0.4);
+  border-color: rgba(115, 218, 202, 0.25);
+  transition: box-shadow 0.3s, border-color 0.3s;
+}
 .avatar-svg svg { width: 100%; height: 100%; border-radius: 8px; }
 .avatar-sign-label {
   position: absolute;
@@ -559,7 +564,7 @@ body {
     </div>
     <div class="conversation" id="conversation">
       <div class="empty-state" id="empty-state">
-        Sign at the camera or click the mic to start a conversation.
+        Sign at the camera to translate ASL → English<br>or click the mic to translate Speech → ASL
       </div>
     </div>
   </div>
@@ -736,7 +741,11 @@ socket.on('avatar_sign', (data) => {
   if (!avatarIsAnimating) avatarPlayNext();
 });
 
-function avatarShowFrame(svgContent, sign) {
+const avatarContainer = document.getElementById('avatar-container');
+
+// Crossfade: only used between DIFFERENT signs (not between frames of same sign)
+function avatarCrossfadeTo(svgContent, sign) {
+  avatarContainer.classList.add('signing');
   const next = avatarCurrentLayer === 'a' ? 'b' : 'a';
   const nextEl = document.getElementById('avatar-svg-' + next);
   const currEl = document.getElementById('avatar-svg-' + avatarCurrentLayer);
@@ -751,12 +760,19 @@ function avatarShowFrame(svgContent, sign) {
   el.avatarSign.textContent = 'Signing: ' + sign;
 }
 
+// Direct replace: used for frames WITHIN the same sign (no flicker)
+function avatarDirectReplace(svgContent) {
+  const activeEl = document.getElementById('avatar-svg-' + avatarCurrentLayer);
+  activeEl.innerHTML = svgContent;
+}
+
 function avatarPlayNext() {
   clearTimeout(avatarIdleTimeout);
 
   if (avatarSignQueue.length === 0) {
     avatarIsAnimating = false;
     el.avatarQueue.textContent = '';
+    avatarContainer.classList.remove('signing');
     avatarIdleTimeout = setTimeout(() => {
       if (!avatarIsAnimating) avatarShowIdle();
     }, 3000);
@@ -773,26 +789,26 @@ function avatarPlayNext() {
     ? avatarSignQueue.length + ' remaining' : '';
 
   if (type === 'svg_multi' && frames.length > 1) {
-    // Multi-frame sign: cycle through frames with crossfade
-    let frameIdx = 0;
-    const frameTime = 80;  // 80ms per frame — very fast, smooth motion
+    // First frame: crossfade from previous sign
+    avatarCrossfadeTo(frames[0], sign);
+    let frameIdx = 1;
+    const frameTime = 60;  // 60ms per frame — very fast, no flicker
 
     function showNextFrame() {
       if (frameIdx >= frames.length) {
-        // Done with this sign, move to next
-        setTimeout(avatarPlayNext, 100);
+        setTimeout(avatarPlayNext, 80);
         return;
       }
-      avatarShowFrame(frames[frameIdx], sign);
+      // Direct replace on same layer — NO flicker
+      avatarDirectReplace(frames[frameIdx]);
       frameIdx++;
       setTimeout(showNextFrame, frameTime);
     }
-    showNextFrame();
+    setTimeout(showNextFrame, frameTime);
   } else {
-    // Single frame sign
     const content = item.content || (frames.length > 0 ? frames[0] : '');
-    avatarShowFrame(content, sign);
-    setTimeout(avatarPlayNext, 600);
+    avatarCrossfadeTo(content, sign);
+    setTimeout(avatarPlayNext, 500);
   }
 }
 
@@ -873,7 +889,7 @@ document.getElementById('clear-btn').addEventListener('click', () => {
   socket.emit('clear_conversation');
   el.conversation.innerHTML =
     '<div class="empty-state" id="empty-state">' +
-      'Sign at the camera or click the mic to start a conversation.' +
+      'Sign at the camera to translate ASL → English<br>or click the mic to translate Speech → ASL' +
     '</div>';
 });
 
