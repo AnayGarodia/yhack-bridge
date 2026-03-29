@@ -61,6 +61,7 @@ class SpeechPipeline:
         self._lock = threading.Lock()
         self._running = False
         self._flush_thread: threading.Thread | None = None
+        self._history: list[str] = []   # last N smoothed English sentences
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -133,10 +134,14 @@ class SpeechPipeline:
         try:
             raw = " ".join(tokens)
             print(f"[pipeline] smoothing: {raw!r}")
-            text = self._smoother.smooth(tokens)
+            ctx = self._history[-3:] if self._history else None
+            text = self._smoother.smooth(tokens, context=ctx)
             if text:
                 print(f"[pipeline] speaking:  {text!r}")
                 self._tts.speak_async(text)
+                self._history.append(text)
+                if len(self._history) > 5:
+                    self._history.pop(0)
         except Exception as e:
             print(f"[pipeline] error: {e}")
 

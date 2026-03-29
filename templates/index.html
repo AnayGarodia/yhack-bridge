@@ -126,6 +126,47 @@ body {
   color: var(--text-secondary);
 }
 
+/* Candidate chips */
+.candidates {
+  display: flex;
+  gap: 6px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+.candidate-chip {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: #222;
+  border: 1px solid var(--border);
+  font-size: 11px;
+}
+.candidate-chip.top { border-color: var(--green); background: rgba(34,197,94,0.1); }
+.chip-name { font-weight: 600; color: var(--text); }
+.chip-prob { color: var(--text-secondary); font-size: 10px; min-width: 28px; text-align: right; }
+.chip-bar { width: 30px; height: 3px; background: #333; border-radius: 2px; overflow: hidden; }
+.chip-bar .chip-fill { height: 100%; border-radius: 2px; background: var(--green); transition: width 0.2s; }
+
+/* Live decoded sentence preview */
+.live-sentence {
+  margin-top: 10px;
+  padding: 8px 12px;
+  background: rgba(37,99,235,0.1);
+  border: 1px solid rgba(37,99,235,0.3);
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--blue);
+  text-align: center;
+  letter-spacing: 1px;
+  min-height: 32px;
+  transition: all 0.2s;
+}
+.live-sentence:empty { display: none; }
+
 /* Center panel — avatar */
 .panel-center {
   width: 30%;
@@ -345,6 +386,8 @@ body {
     <div class="sign-display">
       <div class="current-sign idle" id="current-sign">Waiting for signs...</div>
       <div class="confidence-bar"><div class="fill" id="conf-fill"></div></div>
+      <div class="candidates" id="candidates"></div>
+      <div class="live-sentence" id="live-sentence"></div>
       <div class="mode-hint" id="mode-hint">Mode: Auto</div>
     </div>
   </div>
@@ -392,6 +435,8 @@ const el = {
   confFill: document.getElementById('conf-fill'),
   modeHint: document.getElementById('mode-hint'),
   modeBadge: document.getElementById('mode-badge'),
+  candidates: document.getElementById('candidates'),
+  liveSentence: document.getElementById('live-sentence'),
   conversation: document.getElementById('conversation'),
   emptyState: document.getElementById('empty-state'),
   buildingTokens: document.getElementById('building-tokens'),
@@ -419,14 +464,36 @@ socket.on('sign_update', (data) => {
 
   el.modeHint.textContent = 'Recognizing...';
 
+  // Render candidate chips (top 5 predictions)
+  if (data.candidates && data.candidates.length > 0) {
+    el.candidates.innerHTML = data.candidates.map((c, i) => {
+      const p = Math.round(c.prob * 100);
+      const cls = i === 0 ? 'candidate-chip top' : 'candidate-chip';
+      return '<div class="' + cls + '">' +
+        '<span class="chip-name">' + escHtml(c.sign) + '</span>' +
+        '<div class="chip-bar"><div class="chip-fill" style="width:' + p + '%"></div></div>' +
+        '<span class="chip-prob">' + p + '%</span>' +
+      '</div>';
+    }).join('');
+  }
+
   // Reset after idle
   clearTimeout(signTimeout);
   signTimeout = setTimeout(() => {
     el.currentSign.textContent = 'Waiting for signs...';
     el.currentSign.className = 'current-sign idle';
     el.confFill.style.width = '0%';
+    el.candidates.innerHTML = '';
+    el.liveSentence.textContent = '';
     el.modeHint.textContent = 'Show a sign to the camera';
-  }, 2000);
+  }, 3000);
+});
+
+// ── Live decoded sentence (continuous stream from LLM decoder) ──────────
+socket.on('live_sentence', (data) => {
+  if (data.signs && data.signs.length > 0) {
+    el.liveSentence.textContent = data.signs.join(' ');
+  }
 });
 
 // ── Sign committed (sign completed — hands dropped after gesture) ────────

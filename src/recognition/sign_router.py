@@ -1,17 +1,18 @@
 """
-SignRouter — unified interface for ASL recognition.
+SignRouter — unified interface for ASL recognition with continuous decoding.
 
-Works like a human interpreter:
-  1. While signer is signing (hands visible) → show live prediction on UI
-  2. When signer finishes (hands drop) → commit the best word → feed to pipeline
-  3. Wait for next sign
-
-This prevents the model from spamming partial/wrong predictions mid-gesture.
+How it works:
+  1. While signing (hands visible) → collect top-5 prediction snapshots
+  2. Every ~1.5s, reset the frame buffer so predictions stay fresh
+  3. Every ~1.5s, send the prediction stream to the LLM decoder (async)
+     → UI shows the evolving sentence in real-time ("hello" → "hello dad")
+  4. When hands drop → final decode, commit all signs to the pipeline
 """
 
 import collections
 import os
 import sys
+import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
@@ -32,14 +33,39 @@ _MODE_WORD = "word"
 _MODE_LETTER = "letter"
 _MODE_IDLE = "idle"
 
-# How many no-hand frames before we consider the sign "done"
-HAND_DROP_FRAMES = 8    # ~0.27s at 30fps — pause between signs
-MIN_SIGN_FRAMES = 15    # minimum frames of hands visible to count as a sign
+# Hand presence thresholds
+HAND_DROP_FRAMES = 3        # ~0.1s at 30fps
+HAND_START_FRAMES = 2       # start signing after just 2 frames with hands
+
+# Safety-net buffer reset (commit-on-stability handles normal transitions)
+BUFFER_RESET_FRAMES = 60    # ~2s — only fires if no commit for a very long time
+
+# Continuous decode interval (seconds) — async LLM preview only
+DECODE_INTERVAL_S = 0.7
+
+# Commit-on-stability: as soon as the same sign appears N times in a row, commit it.
+# No need to wait for a sign change — reset buffer immediately and start fresh.
+SIGN_STABLE_COUNT = 2       # 2 consecutive same predictions → commit
+SAME_SIGN_COOLDOWN = 45     # frames (~1.5s) before same sign can be committed again
+
+# Known model confusions: the TFLite model frequently misclassifies these.
+# Maps raw model output → the sign that was actually meant.
+# Applied at commit time so these never reach the output uncorrected.
+_CONFUSION_REMAP = {
+    "scissors": "name",     # model sees scissor shape → almost always means "name"
+    "grass":    "please",   # grass handshape identical to please in this model
+    "hat":      "think",    # hat tap → think/know confusion; think is far more common
+    "elephant": "that",     # elephant trunk shape ≈ "that" pointing
+    "sun":      "no",       # sun shape ≈ "no" shake
+    "fireman":  "red",      # fireman hat ≈ "red" on lips
+    "taste":    "food",     # taste fingers → food is more likely in conversation
+    "empty":    "finish",   # empty sweep ≈ "finish" sweep
+}
 
 
 class SignRouter:
-    def __init__(self, word_threshold=0.25, letter_threshold=0.55,
-                 word_cooldown_s=1.5):
+    def __init__(self, word_threshold=0.40, letter_threshold=0.55,
+                 word_cooldown_s=1.5, sign_decoder=None):
         self.word_threshold = word_threshold
         self.letter_threshold = letter_threshold
         self.word_cooldown_s = word_cooldown_s
@@ -48,18 +74,42 @@ class SignRouter:
         self._letter_clf = None
         self._text_buffer = []
 
-        # State tracking
-        self._hands_visible_count = 0    # consecutive frames with hands
-        self._no_hand_count = 0          # consecutive frames without hands
-        self._signing = False            # currently in a sign gesture
-        self._sign_predictions = []      # predictions accumulated during this sign
+        # Conversation history: list of recent English sentences for context
+        self._conversation_history = []
 
-        # Live display state (updated every inference, shown on UI)
+        # Sign decoder (LLM-based, optional)
+        self._decoder = sign_decoder
+
+        # State tracking
+        self._hands_visible_count = 0
+        self._no_hand_count = 0
+        self._signing = False
+        self._signing_frame_count = 0    # frames since signing started
+
+        # Prediction stream: list of {"t": float, "top5": [(name, prob), ...]}
+        self._prediction_stream = []
+
+        # Stability tracking for mid-sign commits
+        self._stable_sign = None        # sign consistently seen in recent predictions
+        self._stable_count = 0          # consecutive matching prediction count
+        self._last_commit_sign = None   # last committed sign (for cooldown)
+        self._last_commit_frame = -999  # signing_frame_count when last committed
+
+        # Live display state
         self._live_sign = None
         self._live_conf = 0.0
         self._live_top5 = []
 
-        # Committed state (only set when a sign is finalized)
+        # Continuous decode state
+        self._last_decode_time = 0.0
+        self._decode_lock = threading.Lock()
+        self._decode_running = False
+        self._live_decoded = []          # latest decoded sentence (updated async)
+
+        # Commit queue: decoded signs waiting to be emitted one per frame
+        self._commit_queue = collections.deque()
+
+        # Committed state
         self._last_committed = None
         self._last_commit_time = 0.0
 
@@ -80,102 +130,206 @@ class SignRouter:
         Returns:
             annotated_frame, sign_or_None, confidence, mode
 
-        sign is only non-None when a completed sign is committed
-        (hands dropped after signing). The UI should also use
-        get_live_display() for real-time feedback.
+        sign is non-None when:
+          - A completed sign is committed (hands dropped → decoder ran)
+          - A queued decoded sign is being drained (one per frame)
         """
         if self._word_clf is None:
             raise RuntimeError("Call SignRouter.open() first")
 
+        # 0. Drain commit queue (one sign per frame)
+        if self._commit_queue:
+            queued_sign = self._commit_queue.popleft()
+            annotated, _ = self._word_clf.process_frame(frame_bgr)
+            return annotated, queued_sign, 0.9, _MODE_WORD
+
         # 1. Run holistic tracker + buffer landmarks
         annotated, hands_visible = self._word_clf.process_frame(frame_bgr)
 
-        # 2. Track hand presence state
+        # 2. Track hand presence
         if hands_visible:
             self._hands_visible_count += 1
             self._no_hand_count = 0
 
-            # Start signing if hands have been up long enough
-            if self._hands_visible_count >= 5 and not self._signing:
+            if self._hands_visible_count >= HAND_START_FRAMES and not self._signing:
                 self._signing = True
-                self._sign_predictions.clear()
+                self._signing_frame_count = 0
+                self._prediction_stream.clear()
+                self._live_decoded = []
+                self._last_decode_time = time.monotonic()
+                self._stable_sign = None
+                self._stable_count = 0
+                self._last_commit_sign = None
+                self._last_commit_frame = -999
 
+            if self._signing:
+                self._signing_frame_count += 1
+
+                # Safety net: force reset if no sign committed in a long time
+                if self._signing_frame_count % BUFFER_RESET_FRAMES == 0:
+                    self._word_clf.on_sign_boundary()
+                    self._stable_sign = None
+                    self._stable_count = 0
         else:
             self._no_hand_count += 1
             self._hands_visible_count = 0
 
-        # 3. Run inference for live display (async, non-blocking)
+        # 3. Run async inference + collect predictions
         self._word_clf.maybe_run_async()
         (raw_sign, raw_conf), top5 = self._word_clf.get_async_result()
 
-        # Update live display
         if raw_sign is not None:
             self._live_sign = raw_sign
             self._live_conf = raw_conf
             self._live_top5 = top5
 
-            # Accumulate predictions during signing
-            if self._signing:
-                self._sign_predictions.append((raw_sign, raw_conf))
+            # Append to prediction stream during signing
+            if self._signing and top5:
+                self._prediction_stream.append({
+                    "t": time.monotonic(),
+                    "top5": [(name, prob) for name, prob in top5],
+                })
 
-        # 4. Check for sign completion (hands dropped after signing)
+                # --- Commit-on-stability ---
+                # Same sign N times in a row → commit it now, reset, start fresh.
+                # No waiting for a sign-change signal — that was the bottleneck.
+                if raw_sign == self._stable_sign:
+                    self._stable_count += 1
+                else:
+                    self._stable_sign = raw_sign
+                    self._stable_count = 1
+
+                if self._stable_count >= SIGN_STABLE_COUNT:
+                    frames_since = self._signing_frame_count - self._last_commit_frame
+                    if (raw_sign != self._last_commit_sign or
+                            frames_since >= SAME_SIGN_COOLDOWN):
+                        # Use weighted vote on accumulated stream (handles confusions
+                        # better than raw top-1), then apply known confusion remap.
+                        best = self._pick_best_from_stream(self._prediction_stream)
+                        commit_sign = _CONFUSION_REMAP.get(best[0] if best else raw_sign,
+                                                           best[0] if best else raw_sign)
+                        self._mid_sign_commit(commit_sign)
+                        self._last_commit_sign = raw_sign  # track raw for cooldown
+                        self._last_commit_frame = self._signing_frame_count
+                        self._stable_sign = None
+                        self._stable_count = 0
+                        self._word_clf.on_sign_boundary()
+                        self._prediction_stream.clear()
+
+        # 4. Continuous decode: every DECODE_INTERVAL_S, decode the stream so far
+        if (self._signing and self._decoder and
+                len(self._prediction_stream) >= 3):
+            now = time.monotonic()
+            if (now - self._last_decode_time >= DECODE_INTERVAL_S and
+                    not self._decode_running):
+                self._last_decode_time = now
+                stream_copy = list(self._prediction_stream)
+                self._decode_running = True
+                threading.Thread(
+                    target=self._async_decode,
+                    args=(stream_copy, False),
+                    daemon=True,
+                ).start()
+
+        # 5. Hand drop → final decode and commit
         committed_sign, committed_conf, committed_mode = None, 0.0, _MODE_IDLE
 
         if (self._signing and
                 self._no_hand_count >= HAND_DROP_FRAMES and
-                len(self._sign_predictions) >= 1):
+                len(self._prediction_stream) >= 1):
 
-            # Sign is done — pick the best prediction
-            best = self._pick_best_prediction()
-            now = time.monotonic()
+            signs = self._final_decode()
 
-            if best is not None:
-                sign_name, sign_conf = best
-                # Apply cooldown
-                if (sign_name != self._last_committed or
-                        (now - self._last_commit_time) > self.word_cooldown_s):
-                    committed_sign = sign_name
-                    committed_conf = sign_conf
-                    committed_mode = _MODE_WORD
-                    self._last_committed = sign_name
-                    self._last_commit_time = now
-                    self._text_buffer.append(sign_name)
-                    print(f"[SignRouter] COMMIT: {sign_name} ({sign_conf:.0%})")
+            if signs:
+                # Commit first sign now, queue the rest
+                committed_sign = signs[0]
+                committed_conf = 0.9
+                committed_mode = _MODE_WORD
+                self._text_buffer.append(signs[0])
+                print(f"[SignRouter] COMMIT: {signs[0]}")
 
-            # Reset for next sign
+                for s in signs[1:]:
+                    self._commit_queue.append(s)
+                    self._text_buffer.append(s)
+                    print(f"[SignRouter] COMMIT (queued): {s}")
+
+                self._last_committed = signs[-1]
+                self._last_commit_time = time.monotonic()
+
+            # Full reset
             self._signing = False
-            self._sign_predictions.clear()
+            self._signing_frame_count = 0
+            self._prediction_stream.clear()
+            self._live_decoded = []
             self._word_clf.on_sign_boundary()
             self._live_sign = None
             self._live_conf = 0.0
+            self._stable_sign = None
+            self._stable_count = 0
 
         return annotated, committed_sign, committed_conf, committed_mode
 
-    def _pick_best_prediction(self):
-        """Pick the most confident prediction from the signing period."""
-        if not self._sign_predictions:
-            return None
+    def _mid_sign_commit(self, sign: str) -> None:
+        """Commit a sign detected mid-signing (boundary detected while hands are still up)."""
+        self._commit_queue.append(sign)
+        self._text_buffer.append(sign)
+        self._last_committed = sign
+        self._last_commit_time = time.monotonic()
+        print(f"[SignRouter] MID-COMMIT: {sign}")
 
-        # Weighted vote: accumulate confidence per sign
-        votes = collections.Counter()
-        for sign, conf in self._sign_predictions:
-            if conf >= self.word_threshold:
-                votes[sign] += conf
+    def add_to_history(self, sentence: str) -> None:
+        """Add a completed English sentence to conversation history (for LLM context)."""
+        if sentence:
+            self._conversation_history.append(sentence)
+            if len(self._conversation_history) > 5:
+                self._conversation_history.pop(0)
 
+    def _async_decode(self, stream, is_final):
+        """Run decoder in background thread, update _live_decoded."""
+        try:
+            ctx = self._conversation_history[-3:] if self._conversation_history else None
+            signs = self._decoder.decode(stream, context=ctx)
+            with self._decode_lock:
+                self._live_decoded = signs
+        except Exception as e:
+            print(f"[SignRouter] decode error: {e}")
+        finally:
+            self._decode_running = False
+
+    def _final_decode(self):
+        """Fast decode on hand-drop: weighted vote + confusion remap, no LLM blocking."""
+        signs = self._pick_best_from_stream(list(self._prediction_stream))
+        return [_CONFUSION_REMAP.get(s, s) for s in signs]
+
+    def _pick_best_from_stream(self, stream):
+        """Rank + frequency weighted vote across all snapshots.
+        Considers top-3 candidates with decaying rank weights."""
+        from src.translation.sign_decoder import _freq_weight
+        if not stream:
+            return []
+        votes = {}
+        for snap in stream:
+            for rank, (name, prob) in enumerate(snap["top5"][:3]):
+                rank_w = [1.0, 0.4, 0.15][rank]
+                votes[name] = votes.get(name, 0.0) + prob * _freq_weight(name) * rank_w
         if not votes:
-            return None
-
-        best_sign = votes.most_common(1)[0][0]
-        # Get max confidence for the winning sign
-        best_conf = max(c for s, c in self._sign_predictions if s == best_sign)
-        return best_sign, best_conf
+            return []
+        return [max(votes, key=votes.get)]
 
     def get_live_display(self):
         """
         Get the current live prediction for UI display.
-        Returns (sign, confidence, top5) — updated continuously during signing.
+        Returns (sign, confidence, top5).
         """
         return self._live_sign, self._live_conf, self._live_top5
+
+    def get_live_decoded(self):
+        """
+        Get the latest continuously-decoded sentence.
+        Returns list of sign names, e.g. ["hello", "dad"].
+        """
+        with self._decode_lock:
+            return list(self._live_decoded)
 
     @property
     def text_so_far(self):
@@ -187,6 +341,13 @@ class SignRouter:
             self._word_clf.reset()
         self._last_committed = None
         self._signing = False
-        self._sign_predictions.clear()
+        self._signing_frame_count = 0
+        self._prediction_stream.clear()
+        self._live_decoded = []
+        self._commit_queue.clear()
         self._live_sign = None
         self._live_conf = 0.0
+        self._stable_sign = None
+        self._stable_count = 0
+        self._last_commit_sign = None
+        self._last_commit_frame = -999

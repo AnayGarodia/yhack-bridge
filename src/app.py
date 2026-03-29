@@ -46,6 +46,7 @@ from src.speech.tts import TTSEngine
 from src.speech.pipeline import SpeechPipeline
 from src.translation.text_smoother import TextSmoother
 from src.translation.english_to_signs import EnglishToSigns
+from src.translation.sign_decoder import SignDecoder
 from src.avatar.sign_database import SignDatabase
 from src.avatar.avatar_renderer import AvatarRenderer
 from src.avatar.avatar_controller import AvatarController
@@ -53,19 +54,25 @@ from src.avatar.avatar_controller import AvatarController
 
 # ── WebSpeechPipeline — adds SocketIO emit on sentence completion ────────────
 class WebSpeechPipeline(SpeechPipeline):
-    def __init__(self, smoother, tts, sio, **kw):
+    def __init__(self, smoother, tts, sio, router, **kw):
         super().__init__(smoother, tts, **kw)
         self._sio = sio
+        self._router = router
 
     def _process(self, tokens):
         try:
             raw = " ".join(tokens)
             print(f"[pipeline] smoothing: {raw!r}")
-            text = self._smoother.smooth(tokens)
+            ctx = self._history[-3:] if self._history else None
+            text = self._smoother.smooth(tokens, context=ctx)
             if text:
                 print(f"[pipeline] speaking:  {text!r}")
                 self._tts.speak_async(text)
                 self._sio.emit("sentence_complete", {"glosses": raw, "english": text})
+                self._history.append(text)
+                if len(self._history) > 5:
+                    self._history.pop(0)
+                self._router.add_to_history(text)
         except Exception as e:
             print(f"[pipeline] error: {e}")
 
@@ -78,10 +85,11 @@ if not lava_token:
     print("ERROR: LAVA_TOKEN missing from .env")
     sys.exit(1)
 
-sign_router = SignRouter()
+sign_decoder = SignDecoder(lava_token=lava_token)
+sign_router = SignRouter(sign_decoder=sign_decoder)
 smoother = TextSmoother(lava_token=lava_token)
 tts = TTSEngine(eleven_api_key=eleven_key)
-pipeline = WebSpeechPipeline(smoother, tts, socketio, pause_s=2.0)
+pipeline = WebSpeechPipeline(smoother, tts, socketio, sign_router, pause_s=3.5)
 e2s = EnglishToSigns(lava_token=lava_token)
 sign_db = SignDatabase()
 avatar_renderer = AvatarRenderer(width=480, height=640)
@@ -141,6 +149,16 @@ def _recognition_loop():
                     "sign": live_sign,
                     "confidence": round(live_conf, 3),
                     "mode": "word",
+                    "candidates": [
+                        {"sign": name, "prob": round(prob, 3)}
+                        for name, prob in (live_top5 or [])[:5]
+                    ],
+                })
+            # Send continuously-decoded sentence preview
+            live_decoded = sign_router.get_live_decoded()
+            if live_decoded:
+                socketio.emit("live_sentence", {
+                    "signs": live_decoded,
                 })
 
         # Only feed pipeline when a sign is COMMITTED (hands dropped after signing)

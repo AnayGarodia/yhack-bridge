@@ -19,13 +19,34 @@ import requests
 
 LAVA_BASE = "https://api.lavapayments.com/v1/forward"
 
-_SYSTEM_PROMPT = (
-    "You translate raw ASL sign sequences into natural spoken English. "
-    "ASL is telegraphic: it omits articles, auxiliaries, and copulas, and uses "
-    "topic-comment word order (e.g. 'FOOD WANT I' means 'I want food'). "
-    "Output exactly one fluent English sentence — nothing else. "
-    "Keep it concise. Do not add information that wasn't in the input."
-)
+_SYSTEM_PROMPT = """\
+You convert raw ASL sign recognition output into natural spoken English.
+
+The input comes from an automated ASL recognizer (not a human typist), so expect:
+- Lowercase sign labels like: hello, thankyou, please, dad, mom, hungry, water
+- Compound words: "thankyou" = thank you, "haveto" = have to, "minemy" = mine/my, \
+"hesheit" = he/she/it, "weus" = we/us, "callonphone" = call on phone, \
+"frenchfries" = french fries, "icecream" = ice cream, "glasswindow" = glass window
+- ASL topic-comment order: topic first, then comment (e.g. "food want" = "I want food")
+- No articles, auxiliaries, or copulas — ASL drops: a, the, is, are, am, do, does
+- Repeated signs may indicate emphasis or recognizer noise — deduplicate naturally
+- Fingerspelled words appear as single letters: "J O H N" or "j o h n" = the name John
+- The sign "fine" means "I'm fine / good", "owie" means "hurt/pain"
+- Signs may arrive in imperfect order due to recognition errors
+
+Rules:
+- Output exactly ONE fluent English sentence — nothing else
+- Be LITERAL — only use words that are directly implied by the signs given
+- Do NOT invent context, motivation, or extra meaning (no "I want...", "I need...", \
+"I'm sorry..." unless those signs actually appear)
+- Do NOT apologize or say "no input" — if the signs are unclear, just translate \
+the words you see as literally as possible
+- Keep it short. 1-5 signs = very short sentence. Just add minimal grammar.
+- If input is a single sign (hello, bye, thankyou, please, yes, no, etc.), \
+just output that word naturally: "hello" → "Hello." not "Hello, how are you?"
+- A few signs → short sentence. "dad happy" → "Dad is happy." NOT "My dad is feeling happy today."
+- "minemy name" → "My name." / "minemy please scissors" → "My scissors, please."\
+"""
 
 
 class TextSmoother:
@@ -50,12 +71,13 @@ class TextSmoother:
         self._model = model
         self._timeout = timeout
 
-    def smooth(self, tokens: list[str]) -> str:
+    def smooth(self, tokens: list[str], context: list[str] | None = None) -> str:
         """
         Convert a list of ASL tokens into a fluid English sentence.
 
         Args:
-            tokens: e.g. ["HELLO", "NAME", "I", "JOHN"]
+            tokens:  e.g. ["HELLO", "NAME", "I", "JOHN"]
+            context: recent English sentences from the conversation (for grounding)
         Returns:
             A single natural English sentence, or empty string on empty input.
         """
@@ -63,11 +85,16 @@ class TextSmoother:
         if not raw:
             return ""
 
+        user_content = raw
+        if context:
+            history_str = "\n".join(f"- {s}" for s in context)
+            user_content = f"Prior conversation:\n{history_str}\n\nCurrent signs: {raw}"
+
         payload = {
             "model": self._model,
             "messages": [
                 {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": raw},
+                {"role": "user", "content": user_content},
             ],
             "max_tokens": 128,
             "temperature": 0.3,

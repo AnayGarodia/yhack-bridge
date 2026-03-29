@@ -25,9 +25,10 @@ _LABELS_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "models", "si
 # Config
 # ---------------------------------------------------------------------------
 ROWS_PER_FRAME = 543
-MIN_FRAMES = 10
+MIN_FRAMES = 8
 MAX_FRAMES = 384
-STRIDE = 15
+STRIDE = 5            # infer every 5 frames (~0.17s) for fast response
+WINDOW_FRAMES = 30    # sliding window: use only the last 30 frames per inference
 NUM_CLASSES = 250
 
 
@@ -174,7 +175,7 @@ class TFLiteClassifier:
         if self._call_n % STRIDE != 0:
             return self._last_result
 
-        result, top5 = self._run_inference(list(self._buf))
+        result, top5 = self._run_inference(list(self._buf)[-WINDOW_FRAMES:])
         self._last_result = result
         self._last_top5 = top5
         with self._async_lock:
@@ -198,7 +199,7 @@ class TFLiteClassifier:
         if self._async_running:
             return False
 
-        frames = list(self._buf)
+        frames = list(self._buf)[-WINDOW_FRAMES:]  # sliding window
         self._async_running = True
         threading.Thread(target=self._infer_bg, args=(frames,), daemon=True).start()
         return True
