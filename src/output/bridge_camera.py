@@ -200,7 +200,7 @@ class BridgeCamera:
             ah, aw = avatar_img.shape[:2]
             # Scale to fit frame with margins
             avail_h = h - 100  # header + footer space
-            scale = min((w * 0.6) / aw, avail_h / ah)
+            scale = min((w * 0.55) / aw, (avail_h * 0.95) / ah)
             new_w = int(aw * scale)
             new_h = int(ah * scale)
             resized = cv2.resize(avatar_img, (new_w, new_h), interpolation=cv2.INTER_AREA)

@@ -433,6 +433,67 @@ _HARDCODED_SIGNS = {
         {"right_hand": {"x": 235, "y": 185, "thumb": "extended", "index": "curled", "middle": "curled", "ring": "curled", "pinky": "curled", "palm_facing": "inward"},
          "left_hand": _REST_L, "description": "Tip hand up to mouth — drink"},
     ],
+    "FRIEND": [
+        {"right_hand": {"x": 240, "y": 260, "thumb": "curled", "index": "extended", "middle": "curled", "ring": "curled", "pinky": "curled", "palm_facing": "outward"},
+         "left_hand": {"x": 180, "y": 280, "thumb": "curled", "index": "extended", "middle": "curled", "ring": "curled", "pinky": "curled", "palm_facing": "outward"},
+         "description": "Hook index fingers together — friend"},
+    ],
+    "FAMILY": [
+        {"right_hand": {"x": 250, "y": 240, **_OPEN_HAND},
+         "left_hand": {"x": 150, "y": 240, **_OPEN_HAND},
+         "description": "Both F-hands circle forward"},
+        {"right_hand": {"x": 260, "y": 270, **_OPEN_HAND},
+         "left_hand": {"x": 140, "y": 270, **_OPEN_HAND},
+         "description": "Circle outward — family"},
+    ],
+    "HOME": [
+        {"right_hand": {"x": 220, "y": 185, **_S_FIST}, "left_hand": _REST_L,
+         "description": "Bunched fingers touch chin"},
+        {"right_hand": {"x": 240, "y": 165, **_S_FIST}, "left_hand": _REST_L,
+         "description": "Move to cheek — home"},
+    ],
+    "SCHOOL": [
+        {"right_hand": {"x": 250, "y": 260, **_FLAT_HAND},
+         "left_hand": {"x": 170, "y": 280, **_FLAT_HAND},
+         "description": "Clap hands together — school"},
+        {"right_hand": {"x": 260, "y": 250, **_FLAT_HAND},
+         "left_hand": {"x": 160, "y": 290, **_FLAT_HAND},
+         "description": "Clap twice"},
+    ],
+    "WORK": [
+        {"right_hand": {"x": 250, "y": 280, **_S_FIST},
+         "left_hand": {"x": 170, "y": 300, **_S_FIST},
+         "description": "Tap fist on fist — work"},
+        {"right_hand": {"x": 250, "y": 270, **_S_FIST},
+         "left_hand": {"x": 170, "y": 300, **_S_FIST},
+         "description": "Tap again"},
+    ],
+    "LOVE": [
+        {"right_hand": {"x": 220, "y": 270, "thumb": "extended", "index": "extended", "middle": "curled", "ring": "curled", "pinky": "extended", "palm_facing": "outward"},
+         "left_hand": _REST_L, "description": "ILY handshape — I Love You"},
+    ],
+    "FOOD": [
+        {"right_hand": {"x": 230, "y": 190, **_S_FIST}, "left_hand": _REST_L,
+         "description": "Bunched fingers tap mouth — food"},
+        {"right_hand": {"x": 230, "y": 185, **_S_FIST}, "left_hand": _REST_L,
+         "description": "Tap again"},
+    ],
+    "UNDERSTAND": [
+        {"right_hand": {"x": 260, "y": 160, **_S_FIST}, "left_hand": _REST_L,
+         "description": "Fist at forehead, index flicks up"},
+        {"right_hand": {"x": 260, "y": 150, **_POINT}, "left_hand": _REST_L,
+         "description": "Index pops up — understand!"},
+    ],
+    "MORE": [
+        {"right_hand": {"x": 240, "y": 270, **_S_FIST},
+         "left_hand": {"x": 170, "y": 270, **_S_FIST},
+         "description": "Bunched fingertips tap together — more"},
+    ],
+    "STOP": [
+        {"right_hand": {"x": 240, "y": 280, **_FLAT_HAND},
+         "left_hand": {"x": 170, "y": 290, **_FLAT_HAND},
+         "description": "Flat hand chops down on palm — stop"},
+    ],
 }
 
 

@@ -158,15 +158,22 @@ def _stt_flush_loop():
                 for gloss in glosses:
                     rpm_controller.queue_word(gloss)
 
-            # Also send animated SVG for each gloss (web fallback)
+            # Send animated SVG for each gloss
             for gloss in glosses:
-                anim = sign_animator.get_animation(gloss)
-                socketio.emit("avatar_sign", {
-                    "sign": gloss,
-                    "type": anim["type"],
-                    "content": anim.get("content", ""),
-                    "frames": anim.get("frames", []),
-                })
+                try:
+                    anim = sign_animator.get_animation(gloss)
+                    socketio.emit("avatar_sign", {
+                        "sign": gloss,
+                        "type": anim["type"],
+                        "content": anim.get("content", ""),
+                        "frames": anim.get("frames", []),
+                    })
+                except Exception as e:
+                    print(f"[avatar] error for {gloss}: {e}")
+                    socketio.emit("avatar_sign", {
+                        "sign": gloss, "type": "svg",
+                        "content": sign_animator.idle_svg, "frames": [],
+                    })
                 time.sleep(0.1)
         except Exception as e:
             print(f"[stt] error: {e}")
