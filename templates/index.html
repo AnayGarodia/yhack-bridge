@@ -451,6 +451,12 @@ body {
   <div class="building-sentence" id="building-sentence"></div>
   <input type="text" id="test-input" placeholder="Type a word to test avatar..."
          style="flex:1;padding:8px 12px;border-radius:8px;border:1px solid #333;background:#1a1a1a;color:#fff;font-size:13px;font-family:Inter,sans-serif;outline:none"/>
+  <div style="display:flex;gap:16px;align-items:center;font-size:11px;color:#666">
+    <span id="stat-signs">0 signs</span>
+    <span id="stat-words">0 words</span>
+    <span id="stat-uptime">0m</span>
+    <span id="stat-bot" style="color:#22c55e">BOT</span>
+  </div>
   <div class="bar-actions">
     <button class="bar-btn" id="clear-btn">Clear</button>
     <button class="bar-btn" id="export-btn">Export</button>
@@ -745,6 +751,30 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault();
     socket.emit('toggle_mic');
   }
+});
+
+// ── Live stats polling ──────────────────────────────────────────────────
+setInterval(() => {
+  fetch('/api/stats').then(r => r.json()).then(s => {
+    document.getElementById('stat-signs').textContent = s.signs_recognized + ' signs';
+    document.getElementById('stat-words').textContent = s.words_spoken + ' words';
+    const m = Math.floor(s.uptime_seconds / 60);
+    document.getElementById('stat-uptime').textContent = m + 'm';
+    const botEl = document.getElementById('stat-bot');
+    if (s.bot_active) {
+      botEl.textContent = 'BOT LIVE';
+      botEl.style.color = '#22c55e';
+    } else {
+      botEl.textContent = 'BOT OFF';
+      botEl.style.color = '#666';
+    }
+  }).catch(() => {});
+}, 3000);
+
+// ── Sound effect on sign commit ──────────────────────────────────────────
+const commitSound = new Audio('data:audio/wav;base64,UklGRl9vT19teleXQA==');
+socket.on('sign_committed', (data) => {
+  try { commitSound.currentTime = 0; commitSound.play().catch(()=>{}); } catch(e) {}
 });
 </script>
 </body>

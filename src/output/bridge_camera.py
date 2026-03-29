@@ -1,27 +1,18 @@
 """
-BridgeCamera — ASL avatar bot for Google Meet.
+BridgeCamera — ASL interpreter bot for Google Meet.
 
-Shows the ASL avatar performing signs as the virtual camera feed.
-When meeting participants speak, the avatar signs along in real-time.
-Small picture-in-picture webcam in the corner + subtitles.
+This IS the bot. It joins the meeting as a separate participant
+(via OBS Virtual Camera). Other people join with their real cameras.
 
-What other participants see:
-┌─────────────────────────────────────────────┐
-│  Bridge — ASL Interpreter              LIVE │
-│                                    ┌──────┐ │
-│         [ASL Avatar                │webcam│ │
-│          signing along]            │ PiP  │ │
-│                                    └──────┘ │
-│                                             │
-│  Currently signing: HELLO                   │
-│  Speaker: "Hello, how are you?"             │
-└─────────────────────────────────────────────┘
+When people speak → bot shows ASL avatar signing
+When someone signs → bot's TTS speaks the English translation
+
+The feed is NOT mirrored — text reads correctly because Meet
+mirrors self-view but other participants see it normally.
 """
 
 import threading
 import time
-
-import math
 
 import cv2
 import numpy as np
@@ -29,28 +20,25 @@ import numpy as np
 from .virtual_camera import VirtualCamera
 
 
-# Dark gradient background
-def _make_bg(w, h):
+def _make_gradient(w, h):
+    """Dark professional gradient background."""
     bg = np.zeros((h, w, 3), dtype=np.uint8)
     for y in range(h):
         t = y / h
-        bg[y, :] = [int(30 + 15 * t), int(26 + 8 * t), int(26 + 4 * t)]  # dark blue gradient
+        bg[y, :] = [int(40 + 12 * t), int(28 + 14 * t), int(22 + 10 * t)]
     return bg
 
 
 class BridgeCamera:
-    """ASL avatar bot — shows signing avatar as virtual camera in video calls."""
+    """ASL interpreter bot — avatar signing as virtual camera feed."""
 
     def __init__(self, width: int = 1280, height: int = 720, fps: int = 30):
         self._w = width
         self._h = height
-        self._fps = fps
         self._vcam = VirtualCamera(width=width, height=height, fps=fps)
-        self._bg = _make_bg(width, height)
+        self._bg = _make_gradient(width, height)
 
-        # State (thread-safe)
         self._lock = threading.Lock()
-        self._webcam_frame: np.ndarray | None = None
         self._avatar_frame: np.ndarray | None = None
         self._current_sign = ""
         self._sign_conf = 0.0
@@ -61,14 +49,14 @@ class BridgeCamera:
         self._speaker_time = 0.0
         self._speaker_glosses = ""
         self._mic_active = False
+        self._status = "Listening..."
 
     def start(self) -> bool:
         ok = self._vcam.start()
         if ok:
-            print(f"[bridge-cam] Virtual camera started — select it in Google Meet")
-            print(f"[bridge-cam] Device: {self._vcam._cam.device if self._vcam._cam else 'unknown'}")
-        else:
-            print(f"[bridge-cam] Virtual camera unavailable (install OBS first)")
+            print(f"[bot] ASL interpreter bot started")
+            print(f"[bot] Camera: {self._vcam._cam.device if self._vcam._cam else '?'}")
+            print(f"[bot] Join Meet and select 'OBS Virtual Camera' as a second participant")
         return ok
 
     def stop(self):
@@ -78,15 +66,7 @@ class BridgeCamera:
     def is_running(self) -> bool:
         return self._vcam.status == "running"
 
-    # ── Update state ─────────────────────────────────────────────────────
-
-    def update_webcam(self, bgr_frame: np.ndarray):
-        """Update the small PiP webcam frame."""
-        with self._lock:
-            self._webcam_frame = bgr_frame.copy()
-
     def update_avatar(self, bgr_frame: np.ndarray):
-        """Update the avatar frame (from RPM render loop)."""
         with self._lock:
             self._avatar_frame = bgr_frame.copy()
 
@@ -94,6 +74,7 @@ class BridgeCamera:
         with self._lock:
             self._current_sign = sign
             self._sign_conf = confidence
+            self._status = f"Signing: {sign}"
 
     def add_committed_sign(self, sign: str):
         with self._lock:
@@ -106,12 +87,14 @@ class BridgeCamera:
             self._translation = english
             self._translation_time = time.time()
             self._building_signs.clear()
+            self._status = "Listening..."
 
     def set_speaker_text(self, text: str, glosses: str = ""):
         with self._lock:
             self._speaker_text = text
             self._speaker_time = time.time()
             self._speaker_glosses = glosses
+            self._status = "Interpreting..."
 
     def set_mic_active(self, active: bool):
         with self._lock:
@@ -123,11 +106,10 @@ class BridgeCamera:
             self._building_signs.clear()
             self._translation = ""
             self._speaker_text = ""
-
-    # ── Compose and send frame ───────────────────────────────────────────
+            self._status = "Listening..."
 
     def send_composed_frame(self):
-        """Compose avatar + PiP + subtitles and send to virtual camera."""
+        """Compose and send frame to virtual camera."""
         if not self.is_running:
             return
 
@@ -136,7 +118,6 @@ class BridgeCamera:
 
         with self._lock:
             avatar = self._avatar_frame
-            webcam = self._webcam_frame
             sign = self._current_sign
             conf = self._sign_conf
             building = list(self._building_signs)
@@ -145,82 +126,93 @@ class BridgeCamera:
             speaker = self._speaker_text
             speaker_age = time.time() - self._speaker_time
             glosses = self._speaker_glosses
+            status = self._status
+            mic = self._mic_active
 
-        # ── Main area: Avatar or sign display ──
+        # ── Avatar (center, large) ──
         if avatar is not None:
             ah, aw = avatar.shape[:2]
-            target_h = h - 120
-            target_w = int(aw * target_h / ah)
-            if target_w > w - 200:  # leave room for PiP
-                target_w = w - 200
-                target_h = int(ah * target_w / aw)
-            resized = cv2.resize(avatar, (target_w, target_h))
-            x_off = (w - target_w) // 2 - 60  # offset left to make room for PiP
-            y_off = 40
-            frame[y_off:y_off + target_h, x_off:x_off + target_w] = resized
+            # Fill the frame height minus header/footer
+            avail_h = h - 140
+            avail_w = w
+            scale = min(avail_w / aw, avail_h / ah)
+            new_w = int(aw * scale)
+            new_h = int(ah * scale)
+            resized = cv2.resize(avatar, (new_w, new_h))
+            x_off = (w - new_w) // 2
+            y_off = 50 + (avail_h - new_h) // 2
+            frame[y_off:y_off + new_h, x_off:x_off + new_w] = resized
 
-        # Show current sign name large in center if signing
+        # ── Header ──
+        # Gradient header bar
+        for y in range(44):
+            alpha = 0.85 - y * 0.005
+            frame[y, :] = (frame[y, :].astype(float) * (1 - alpha) + np.array([18, 18, 18]) * alpha).astype(np.uint8)
+
+        cv2.putText(frame, "Bridge", (20, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA)
+        cv2.putText(frame, "ASL Interpreter", (120, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (160, 160, 160), 1, cv2.LINE_AA)
+
+        # Status pill
+        pill_text = status
+        (tw, _), _ = cv2.getTextSize(pill_text, cv2.FONT_HERSHEY_SIMPLEX, 0.4, 1)
+        pill_x = w - tw - 30
+        pill_color = (60, 200, 80) if "Signing" in status else (80, 160, 220) if "Interpreting" in status else (120, 120, 120)
+        cv2.rectangle(frame, (pill_x - 10, 12), (pill_x + tw + 10, 36), pill_color, -1, cv2.LINE_AA)
+        cv2.rectangle(frame, (pill_x - 10, 12), (pill_x + tw + 10, 36), (255, 255, 255), 1, cv2.LINE_AA)
+        cv2.putText(frame, pill_text, (pill_x, 29),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1, cv2.LINE_AA)
+
+        # ── Footer subtitle area ──
+        footer_h = 90
+        footer_y = h - footer_h
+
+        # Gradient footer
+        for y in range(footer_h):
+            row = footer_y + y
+            alpha = 0.3 + y / footer_h * 0.6
+            frame[row, :] = (frame[row, :].astype(float) * (1 - alpha) + np.array([12, 12, 12]) * alpha).astype(np.uint8)
+
+        # Line 1: What's being signed or building sentence
+        y1 = footer_y + 28
         if sign and conf > 0.25:
-            sign_label = sign.upper()
-            (tw, th), _ = cv2.getTextSize(sign_label, cv2.FONT_HERSHEY_SIMPLEX, 2.0, 4)
-            sx = (w - tw) // 2
-            sy = h // 2 + th // 2 - 30
-            # Shadow
-            cv2.putText(frame, sign_label, (sx + 2, sy + 2),
-                        cv2.FONT_HERSHEY_SIMPLEX, 2.0, (0, 0, 0), 6, cv2.LINE_AA)
-            cv2.putText(frame, sign_label, (sx, sy),
-                        cv2.FONT_HERSHEY_SIMPLEX, 2.0, (80, 255, 120), 4, cv2.LINE_AA)
-
-        # ── PiP webcam (top-right corner) ──
-        if webcam is not None:
-            pip_h = 140
-            pip_w = int(webcam.shape[1] * pip_h / webcam.shape[0])
-            pip = cv2.resize(webcam, (pip_w, pip_h))
-            px = w - pip_w - 16
-            py = 48
-            # Border
-            cv2.rectangle(frame, (px - 2, py - 2), (px + pip_w + 2, py + pip_h + 2),
-                          (255, 255, 255), 2)
-            frame[py:py + pip_h, px:px + pip_w] = pip
-
-        # ── Header bar ──
-        cv2.rectangle(frame, (0, 0), (w, 36), (20, 20, 20), -1)
-        cv2.putText(frame, "Bridge", (14, 25),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
-        cv2.putText(frame, "ASL Interpreter", (100, 25),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (140, 140, 140), 1, cv2.LINE_AA)
-        # Live dot
-        cv2.circle(frame, (w - 50, 18), 5, (0, 0, 255), -1, cv2.LINE_AA)
-        cv2.putText(frame, "LIVE", (w - 40, 24),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1, cv2.LINE_AA)
-
-        # ── Footer: subtitle area ──
-        footer_y = h - 80
-        cv2.rectangle(frame, (0, footer_y), (w, h), (15, 15, 15), -1)
-
-        y_line = footer_y + 24
-        # Current sign activity
-        if sign and conf > 0.25:
-            cv2.putText(frame, f"Signing: {sign}", (16, y_line),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (80, 255, 80), 1, cv2.LINE_AA)
+            # Show current sign with green accent
+            cv2.putText(frame, sign.upper(), (24, y1),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, (80, 255, 120), 2, cv2.LINE_AA)
+            # Confidence bar
+            bar_x = 24
+            bar_y = y1 + 8
+            bar_w = 120
+            cv2.rectangle(frame, (bar_x, bar_y), (bar_x + bar_w, bar_y + 4), (50, 50, 50), -1)
+            cv2.rectangle(frame, (bar_x, bar_y), (bar_x + int(bar_w * conf), bar_y + 4), (80, 255, 120), -1)
         elif building:
-            cv2.putText(frame, "Signs: " + " ".join(building[-6:]), (16, y_line),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (80, 255, 80), 1, cv2.LINE_AA)
+            signs_text = " ".join(building[-6:])
+            cv2.putText(frame, signs_text, (24, y1),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 100), 1, cv2.LINE_AA)
 
-        # Translation or speaker text
-        y_line2 = footer_y + 52
-        if translation and trans_age < 10:
-            cv2.putText(frame, translation, (16, y_line2),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2, cv2.LINE_AA)
-        elif speaker and speaker_age < 10:
-            cv2.putText(frame, f'"{speaker}"', (16, y_line2),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (100, 180, 255), 1, cv2.LINE_AA)
+        # Line 2: Translation or speaker text
+        y2 = footer_y + 62
+        if speaker and speaker_age < 12:
+            # What the speaker said
+            display = speaker if len(speaker) <= 70 else speaker[:67] + "..."
+            cv2.putText(frame, f'"{display}"', (24, y2),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
+            # Show glosses on the right
             if glosses:
-                cv2.putText(frame, glosses, (w - 300, y_line),
+                (gw, _), _ = cv2.getTextSize(glosses, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+                cv2.putText(frame, glosses, (w - gw - 20, y1),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 200, 80), 1, cv2.LINE_AA)
+        elif translation and trans_age < 12:
+            display = translation if len(translation) <= 70 else translation[:67] + "..."
+            cv2.putText(frame, display, (24, y2),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2, cv2.LINE_AA)
 
         # Mic indicator
-        if self._mic_active:
-            cv2.circle(frame, (w - 24, footer_y + 38), 8, (0, 0, 200), -1, cv2.LINE_AA)
+        if mic:
+            cv2.circle(frame, (w - 20, footer_y + 45), 6, (0, 0, 220), -1, cv2.LINE_AA)
+            # Pulse animation
+            pulse = int(3 * abs(time.time() % 1 - 0.5) * 2)
+            cv2.circle(frame, (w - 20, footer_y + 45), 6 + pulse, (0, 0, 180), 1, cv2.LINE_AA)
 
         self._vcam.send_frame(frame)

@@ -74,6 +74,7 @@ class WebSpeechPipeline(SpeechPipeline):
                 self._tts.speak_async(text)
                 self._sio.emit("sentence_complete", {"glosses": raw, "english": text})
                 bridge_cam.set_translation(text)
+                _stats["sentences_translated"] += 1
                 self._history.append(text)
                 if len(self._history) > 5:
                     self._history.pop(0)
@@ -149,6 +150,7 @@ def _stt_flush_loop():
             print(f"[stt] glosses: {glosses}")
             socketio.emit("speech_transcribed", {"english": sentence, "asl_glosses": glosses})
             bridge_cam.set_speaker_text(sentence, " ".join(glosses))
+            _stats["words_spoken"] += len(sentence.split())
 
             # Feed glosses to RPM avatar controller (3D) if available
             if rpm_controller is not None:
@@ -178,6 +180,14 @@ _running = True
 _mic_active = False
 
 CAMERA_INDEX = int(os.environ.get("CAMERA_INDEX", "0"))
+
+# ── Session stats ────────────────────────────────────────────────────────────
+_stats = {
+    "signs_recognized": 0,
+    "words_spoken": 0,
+    "sentences_translated": 0,
+    "session_start": time.time(),
+}
 
 
 # ── Recognition thread (instant webcam start) ───────────────────────────────
@@ -219,9 +229,8 @@ def _recognition_loop():
         with _frame_lock:
             _latest_frame = jpeg.tobytes()
 
-        # Send webcam to virtual camera PiP
-        if bridge_cam.is_running:
-            bridge_cam.update_webcam(annotated)
+        # Note: webcam feed stays in the web UI only — the virtual camera
+        # shows the bot avatar, not the webcam
 
         frame_n += 1
         if frame_n % 5 == 0:
@@ -251,6 +260,7 @@ def _recognition_loop():
             })
             pipeline.on_sign(committed_sign, committed_mode)
             bridge_cam.add_committed_sign(committed_sign)
+            _stats["signs_recognized"] += 1
 
     cap.release()
     sign_router.close()
@@ -332,6 +342,30 @@ def avatar_idle_svg():
     return Response(sign_animator.idle_svg, mimetype="image/svg+xml")
 
 
+@app.route("/api/stats")
+def api_stats():
+    """Live session statistics."""
+    elapsed = int(time.time() - _stats["session_start"])
+    return {
+        "signs_recognized": _stats["signs_recognized"],
+        "words_spoken": _stats["words_spoken"],
+        "sentences_translated": _stats["sentences_translated"],
+        "uptime_seconds": elapsed,
+        "bot_active": bridge_cam.is_running,
+        "vocabulary_size": 250,
+        "cached_animations": len(sign_animator.cached_signs),
+    }
+
+
+@app.route("/api/vocabulary")
+def api_vocabulary():
+    """Return the full 250-sign vocabulary."""
+    import json as _json
+    labels_path = os.path.join(os.path.dirname(__file__), "..", "models", "sign_to_prediction_index_map.json")
+    with open(labels_path) as f:
+        return _json.load(f)
+
+
 @app.route("/avatar_feed")
 def avatar_feed():
     """MJPEG stream of the RPM 3D avatar (served from render thread buffer)."""
@@ -398,6 +432,19 @@ def handle_clear():
 def handle_set_mode(data):
     mode = data.get("mode", "auto") if data else "auto"
     print(f"[ui] mode set to {mode}")
+
+
+@socketio.on("get_stats")
+def handle_get_stats():
+    elapsed = int(time.time() - _stats["session_start"])
+    mins, secs = divmod(elapsed, 60)
+    socketio.emit("stats", {
+        "signs": _stats["signs_recognized"],
+        "words": _stats["words_spoken"],
+        "sentences": _stats["sentences_translated"],
+        "uptime": f"{mins}m {secs}s",
+        "bot_active": bridge_cam.is_running,
+    })
 
 
 # ── Cleanup ───────────────────────────────────────────────────────────────────
