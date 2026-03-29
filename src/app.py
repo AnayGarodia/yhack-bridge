@@ -91,7 +91,7 @@ if not lava_token:
     sys.exit(1)
 
 sign_decoder = SignDecoder(lava_token=lava_token)
-sign_router = SignRouter(sign_decoder=sign_decoder)
+sign_router = SignRouter(sign_decoder=sign_decoder, word_threshold=0.65)  # high threshold to avoid false positives
 smoother = TextSmoother(lava_token=lava_token)
 tts = TTSEngine(eleven_api_key=eleven_key)
 pipeline = WebSpeechPipeline(smoother, tts, socketio, sign_router, pause_s=3.5)
@@ -148,7 +148,7 @@ def _stt_flush_loop():
             glosses = e2s.convert(sentence)
             print(f"[stt] glosses: {glosses}")
             socketio.emit("speech_transcribed", {"english": sentence, "asl_glosses": glosses})
-            bridge_cam.set_speaker_text(sentence)
+            bridge_cam.set_speaker_text(sentence, " ".join(glosses))
 
             # Feed glosses to RPM avatar controller (3D) if available
             if rpm_controller is not None:
@@ -219,9 +219,9 @@ def _recognition_loop():
         with _frame_lock:
             _latest_frame = jpeg.tobytes()
 
-        # Send to virtual camera for Google Meet
+        # Send webcam to virtual camera PiP
         if bridge_cam.is_running:
-            bridge_cam.send_frame(annotated)
+            bridge_cam.update_webcam(annotated)
 
         frame_n += 1
         if frame_n % 5 == 0:
@@ -286,6 +286,11 @@ def _avatar_render_loop():
                 _, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
                 with _avatar_frame_lock:
                     _avatar_frame = jpeg.tobytes()
+
+                # Send avatar to virtual camera for Google Meet
+                if bridge_cam.is_running:
+                    bridge_cam.update_avatar(frame)
+                    bridge_cam.send_composed_frame()
             except Exception as e:
                 print(f"[rpm] render error: {e}")
             time.sleep(0.033)
@@ -419,8 +424,16 @@ if __name__ == "__main__":
     threading.Thread(target=_avatar_render_loop, daemon=True).start()
     threading.Thread(target=_stt_flush_loop, daemon=True).start()
     pipeline.start()
+
+    # Auto-start mic listening (no need to click button in UI)
+    _mic_active = True
+    stt.start()
+    bridge_cam.set_mic_active(True)
+    print("[mic] auto-started listening")
+
     print(f"\n  Bridge is running at http://localhost:{port}")
     if bridge_cam.is_running:
-        print(f"  Virtual camera active — select it in Google Meet/Zoom")
+        print(f"  Virtual camera active — select 'OBS Virtual Camera' in Google Meet")
+    print(f"  Mic is listening — speak to trigger ASL avatar")
     print()
     socketio.run(app, host="0.0.0.0", port=port, debug=False, allow_unsafe_werkzeug=True)
