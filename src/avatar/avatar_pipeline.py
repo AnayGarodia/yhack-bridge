@@ -16,6 +16,8 @@ import re
 import threading
 import time
 
+from src.avatar.demo_script import find_demo_response
+
 
 class AvatarPipeline:
     """
@@ -75,6 +77,40 @@ class AvatarPipeline:
             "or", "but", "just", "very", "really", "quite", "actually",
             "um", "uh", "like", "so", "well",
         }
+
+    def push_text(self, full_text: str):
+        """
+        Called with a full phrase/sentence from STT.
+        Checks demo script first for exact Q&A matches.
+        Falls back to word-by-word signing if no match.
+        Returns display_text if demo matched, else None.
+        """
+        result = find_demo_response(full_text)
+
+        if result:
+            signs, display_text = result
+            print(f"[avatar] DEMO MATCH: '{full_text}' -> {signs}")
+            with self._lock:
+                self._queue.clear()
+            for sign in signs:
+                with self._lock:
+                    if len(self._queue) >= self.MAX_QUEUE:
+                        self._queue.popleft()
+                    self._queue.append(sign)
+                    self._word_count += 1
+                    self._word_times.append(time.monotonic())
+            self._current_display_text = display_text
+            return display_text
+
+        # Normal word-by-word fallback
+        for word in full_text.split():
+            self.on_word(word)
+        self._current_display_text = ""
+        return None
+
+    @property
+    def current_display_text(self):
+        return getattr(self, '_current_display_text', '')
 
     def on_word(self, word: str):
         """Called by STT for each transcribed word."""

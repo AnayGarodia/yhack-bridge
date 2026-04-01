@@ -175,103 +175,176 @@ def run_recognition(args):
 
 
 # ---------------------------------------------------------------------------
-# Avatar mode (speech → ASL signs display)
+# Avatar mode (speech → ASL signs → Google Meet via OBS Virtual Camera)
 # ---------------------------------------------------------------------------
 
 def run_avatar(args):
     from src.speech.stt import SpeechToText
     from src.avatar.avatar_pipeline import AvatarPipeline
-    from src.avatar.hand_renderer import HandRenderer
+    from src.avatar.avatar_renderer import AvatarRenderer
+    from src.output.virtual_camera import VirtualCamera
+
+    # Load .env for API keys (STT needs GROQ_API_KEY)
+    _env_path = os.path.join(os.path.dirname(__file__), ".env")
+    if os.path.exists(_env_path):
+        with open(_env_path) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    os.environ.setdefault(k.strip(), v.strip())
+
+    # HD resolution for Google Meet
+    MEET_W, MEET_H = 1280, 720
+    FRAMES_PER_SIGN = 18  # 0.6s at 30fps
 
     pipeline = AvatarPipeline()
-    renderer = HandRenderer(width=args.width, height=int(args.width * 3 / 4))
+    avatar = AvatarRenderer(width=MEET_W, height=MEET_H, bg_color=(25, 25, 30))
 
-    # STT callback: each word goes to the pipeline
+    # Sign animation state
+    current_sign = None
+    sign_frame_idx = 0
+
+    # -- Virtual camera for Google Meet --
+    vcam = VirtualCamera(width=MEET_W, height=MEET_H, fps=30)
+    vcam_ok = vcam.start()
+    if not vcam_ok:
+        print("\nWARNING: Virtual camera not available -- local display only")
+        print("To enable Google Meet: open OBS -> Start Virtual Camera -> rerun\n")
+
+    # -- Phrase buffer for demo script matching --
+    phrase_buffer = []
+    last_word_time = [0.0]
+    display_text = [""]
+    PHRASE_FLUSH_S = 1.5
+
     def on_word(word):
         pipeline.on_word(word)
+        phrase_buffer.append(word)
+        last_word_time[0] = time.monotonic()
 
     stt = SpeechToText(on_text=on_word, model_name="tiny")
 
-    print(f"\n  Bridge Avatar Mode")
-    print(f"  Whisper model: {stt.model_name}")
-    print(f"  Audio device: (starting...)")
-    print(f"  q=quit  r=reset\n")
+    print(f"\n{'='*50}")
+    print(f"  Bridge Avatar Mode (Cartoon Character)")
+    if vcam_ok:
+        print(f"  Virtual camera: {vcam.device}")
+        print(f"  In Google Meet: Settings -> Video -> '{vcam.device}'")
+    print(f"  q=quit  r=reset  |  Speak into mic")
+    print(f"{'='*50}\n")
 
     stt.start()
-    # Print audio device after STT starts (it detects in its thread)
     time.sleep(0.5)
     if stt.audio_device:
         print(f"  Audio device: {stt.audio_device}")
 
     WINDOW = "Bridge — Avatar (Speech → ASL)"
     fps_times = collections.deque(maxlen=60)
-    current_sign = None
     signs_shown = []
 
     while True:
         t0 = time.perf_counter()
 
-        # If renderer is idle, get next sign from pipeline
-        if renderer.is_idle:
+        # -- Flush phrase buffer for demo matching --
+        now_mono = time.monotonic()
+        if phrase_buffer and (now_mono - last_word_time[0]) > PHRASE_FLUSH_S:
+            phrase = " ".join(phrase_buffer)
+            phrase_buffer.clear()
+            result = pipeline.push_text(phrase)
+            if result:
+                display_text[0] = result
+
+        # -- Check if current sign animation is done --
+        sign_done = current_sign is None or sign_frame_idx >= FRAMES_PER_SIGN
+        if sign_done:
             next_sign = pipeline.next_sign()
             if next_sign is not None:
-                renderer.set_word(next_sign)
                 current_sign = next_sign
+                sign_frame_idx = 0
                 signs_shown.append(next_sign)
+            else:
+                current_sign = None
 
-        # Get next animation frame (always returns a frame, even blank)
-        frame, done = renderer.next_frame()
+        # -- Render avatar frame --
+        if current_sign:
+            progress = (sign_frame_idx + 1) / FRAMES_PER_SIGN
+            frame = avatar.render_text_card(current_sign)
+            # Draw progress bar at very bottom
+            bar_w = int(MEET_W * progress)
+            cv2.rectangle(frame, (0, MEET_H - 6), (bar_w, MEET_H), (80, 180, 255), -1)
+            sign_frame_idx += 1
+        else:
+            frame = avatar.render_idle("Listening...")
 
-        # Draw status overlays
         h, w = frame.shape[:2]
 
-        # FPS
+        # -- Overlays --
+        # Header bar
+        cv2.rectangle(frame, (0, 0), (w, 36), (16, 16, 16), -1)
+        cv2.putText(frame, "Bridge", (12, 26),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+        cv2.putText(frame, "ASL Interpreter", (110, 26),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (140, 140, 140), 1, cv2.LINE_AA)
+
+        # Status pill
+        if current_sign:
+            pill = f"SIGNING: {current_sign}"
+            pill_col = (60, 200, 80)
+        else:
+            pill = "LISTENING"
+            pill_col = (100, 100, 100)
+        (pw, _), _ = cv2.getTextSize(pill, cv2.FONT_HERSHEY_SIMPLEX, 0.4, 1)
+        px = w - pw - 20
+        cv2.rectangle(frame, (px - 6, 8), (px + pw + 6, 30), pill_col, -1, cv2.LINE_AA)
+        cv2.putText(frame, pill, (px, 24),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1, cv2.LINE_AA)
+
+        # FPS (small, corner)
         fps_times.append(time.perf_counter() - t0)
         fps = 1.0 / (sum(fps_times) / len(fps_times)) if fps_times else 0
-        cv2.putText(frame, f"{fps:.0f} fps", (10, 22),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 100, 100), 1, cv2.LINE_AA)
 
-        # WPM indicator
-        wpm = pipeline.words_per_minute
-        wpm_color = (0, 200, 0) if wpm < 120 else (0, 200, 255) if wpm < 180 else (0, 0, 255)
-        cv2.putText(frame, f"{wpm:.0f} WPM", (w - 120, 22),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, wpm_color, 1, cv2.LINE_AA)
+        # Virtual camera indicator
+        vcam_label = "LIVE" if vcam_ok else "LOCAL"
+        cv2.circle(frame, (w - 14, 24), 5, (0, 0, 255) if vcam_ok else (80, 80, 80), -1)
 
-        # Queue depth
-        qdepth = pipeline.queue_depth
-        q_color = (0, 200, 0) if qdepth <= 1 else (0, 200, 255) if qdepth <= 2 else (0, 0, 255)
-        cv2.putText(frame, f"Queue: {qdepth}", (w - 120, 44),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, q_color, 1, cv2.LINE_AA)
+        # Demo display text (subtitle)
+        dt = display_text[0] or pipeline.current_display_text
+        if dt:
+            cv2.rectangle(frame, (0, h - 90), (w, h - 50), (12, 12, 12), -1)
+            cv2.putText(frame, dt, (20, h - 62),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2, cv2.LINE_AA)
 
-        # "Speaking too fast" warning
-        if qdepth > 3:
-            cv2.putText(frame, "SPEAKING TOO FAST", (w // 2 - 130, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2, cv2.LINE_AA)
-
-        # Recent signs history at bottom
+        # Signs history bar
         if signs_shown:
-            history = " ".join(signs_shown[-8:])
-            cv2.rectangle(frame, (0, h - 35), (w, h), (30, 30, 30), -1)
-            cv2.putText(frame, history, (10, h - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 100), 1, cv2.LINE_AA)
+            history = " ".join(signs_shown[-12:])
+            cv2.rectangle(frame, (0, h - 50), (w, h), (12, 12, 12), -1)
+            cv2.putText(frame, history, (12, h - 20),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 100), 1, cv2.LINE_AA)
+            qdepth = pipeline.queue_depth
+            if qdepth > 0:
+                cv2.putText(frame, f"+{qdepth}", (w - 50, h - 20),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (120, 120, 120), 1, cv2.LINE_AA)
 
-        # Controls
-        cv2.putText(frame, "q=quit  r=reset  |  Speak into mic",
-                    (10, h - 45), cv2.FONT_HERSHEY_SIMPLEX, 0.35,
-                    (80, 80, 80), 1, cv2.LINE_AA)
+        # -- Push frame to virtual camera (Google Meet) --
+        if vcam_ok:
+            vcam.send_frame(frame)
 
-        cv2.imshow(WINDOW, frame)
+        # -- Local preview (smaller window) --
+        preview = cv2.resize(frame, (640, 360))
+        cv2.imshow(WINDOW, preview)
 
-        # Key handling
-        key = cv2.waitKey(33) & 0xFF  # 33ms = ~30fps
+        key = cv2.waitKey(33) & 0xFF
         if key == ord("q"):
             break
         elif key == ord("r"):
             pipeline.clear()
             signs_shown.clear()
-            renderer.set_word("")
+            display_text[0] = ""
+            current_sign = None
 
     stt.stop()
+    if vcam_ok:
+        vcam.stop()
     cv2.destroyAllWindows()
     print(f"\nSigns shown: {' '.join(signs_shown)}")
 

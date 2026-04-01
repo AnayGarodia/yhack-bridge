@@ -191,8 +191,6 @@ class SignRouter:
                 })
 
                 # --- Commit-on-stability ---
-                # Same sign N times in a row → commit it now, reset, start fresh.
-                # No waiting for a sign-change signal — that was the bottleneck.
                 if raw_sign == self._stable_sign:
                     self._stable_count += 1
                 else:
@@ -234,29 +232,27 @@ class SignRouter:
         # 5. Hand drop → final decode and commit
         committed_sign, committed_conf, committed_mode = None, 0.0, _MODE_IDLE
 
-        if (self._signing and
-                self._no_hand_count >= HAND_DROP_FRAMES and
-                len(self._prediction_stream) >= 1):
+        if (self._signing and self._no_hand_count >= HAND_DROP_FRAMES):
 
-            signs = self._final_decode()
+            if len(self._prediction_stream) >= 1:
+                signs = self._final_decode()
 
-            if signs:
-                # Commit first sign now, queue the rest
-                committed_sign = signs[0]
-                committed_conf = 0.9
-                committed_mode = _MODE_WORD
-                self._text_buffer.append(signs[0])
-                print(f"[SignRouter] COMMIT: {signs[0]}")
+                if signs:
+                    committed_sign = signs[0]
+                    committed_conf = 0.9
+                    committed_mode = _MODE_WORD
+                    self._text_buffer.append(signs[0])
+                    print(f"[SignRouter] COMMIT: {signs[0]}")
 
-                for s in signs[1:]:
-                    self._commit_queue.append(s)
-                    self._text_buffer.append(s)
-                    print(f"[SignRouter] COMMIT (queued): {s}")
+                    for s in signs[1:]:
+                        self._commit_queue.append(s)
+                        self._text_buffer.append(s)
+                        print(f"[SignRouter] COMMIT (queued): {s}")
 
-                self._last_committed = signs[-1]
-                self._last_commit_time = time.monotonic()
+                    self._last_committed = signs[-1]
+                    self._last_commit_time = time.monotonic()
 
-            # Full reset
+            # Full reset — always fires on hand drop, even if no predictions
             self._signing = False
             self._signing_frame_count = 0
             self._prediction_stream.clear()

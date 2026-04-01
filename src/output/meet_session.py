@@ -1,15 +1,18 @@
 """
-Meet session — ties virtual camera and frame composer together.
+MeetSession — connects avatar frame source to virtual camera for Google Meet.
 
 Usage:
     session = MeetSession()
-    session.start()
-    while running:
-        session.push_frame(bgr_frame, transcription_text)
-    session.stop()
+    if session.start():
+        # Push frames from your main loop:
+        session.push_frame(bgr_frame, transcription_text="Hello world")
+        # ... later ...
+        session.stop()
 """
 
 import logging
+import time
+import threading
 
 import numpy as np
 
@@ -36,6 +39,10 @@ class MeetSession:
         return self._vcam.status
 
     @property
+    def is_running(self) -> bool:
+        return self._vcam.is_running
+
+    @property
     def is_muted(self) -> bool:
         return self._is_muted
 
@@ -43,13 +50,17 @@ class MeetSession:
     def is_muted(self, value: bool) -> None:
         self._is_muted = value
 
+    @property
+    def device(self) -> str:
+        return self._vcam.device
+
     def start(self) -> bool:
         """Start the virtual camera. Returns False if unavailable."""
         ok = self._vcam.start()
         if ok:
-            logger.info("MeetSession started — virtual camera is live.")
+            print("[meet] MeetSession started -- avatar is live in virtual camera")
         else:
-            logger.warning("MeetSession: virtual camera unavailable, frames will be dropped.")
+            print("[meet] MeetSession: virtual camera unavailable")
         return ok
 
     def push_frame(
@@ -67,7 +78,10 @@ class MeetSession:
         )
         self._vcam.send_frame(composed)
 
+    def push_raw_frame(self, bgr_frame: np.ndarray) -> None:
+        """Send a frame directly without overlays."""
+        self._vcam.send_frame(bgr_frame)
+
     def stop(self) -> None:
-        """Stop the virtual camera."""
         self._vcam.stop()
-        logger.info("MeetSession stopped.")
+        print("[meet] MeetSession stopped")

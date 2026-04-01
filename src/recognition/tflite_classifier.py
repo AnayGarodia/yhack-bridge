@@ -63,7 +63,7 @@ class TFLiteClassifier:
         self.WINDOW_SIZE = int(os.getenv("WINDOW_SIZE", "30"))
         self.STRIDE = int(os.getenv("WINDOW_STRIDE", "5"))
         self.MAX_BUFFER = 60
-        self.MIN_FRAMES = int(os.getenv("MIN_FRAMES", "16"))
+        self.MIN_FRAMES = int(os.getenv("MIN_FRAMES", "8"))
         self.CONFIDENCE_THRESHOLD = float(
             os.getenv("CONFIDENCE_THRESHOLD", str(confidence_threshold))
         )
